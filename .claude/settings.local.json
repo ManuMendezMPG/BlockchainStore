@@ -10,7 +10,10 @@
       "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 --no-git ; echo \"=== EXIT $? ===\" ; rm -f src/Counter.sol test/Counter.t.sol script/Counter.s.sol ; echo \"--- lib ---\" ; ls lib ; echo \"--- OZ version ---\" ; cat lib/openzeppelin-contracts/package.json 2>/dev/null | grep version | head -1')",
       "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && echo \"--- foundry.toml ---\" && cat foundry.toml && echo \"\" && echo \"--- forge remappings \\(auto\\) ---\" && forge remappings && echo \"--- lib dir ---\" && ls lib && echo \"--- src/test/script ---\" && ls src test script')",
       "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && forge test -vv > /tmp/forgetest.log 2>&1 ; echo \"EXIT=$?\"')",
-      "Bash(wsl *)"
+      "Bash(wsl *)",
+      "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && forge build > /tmp/build.log 2>&1 ; echo \"EXIT=$?\"')",
+      "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && forge script script/DeployGameStore.s.sol:DeployGameStore --rpc-url http://127.0.0.1:8545 --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 --broadcast > /tmp/deploy.log 2>&1 ; echo \"EXIT=$?\"')",
+      "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && ADDR=0x5FbDB2315678afecb367f032d93F642f64180aa3 && RPC=http://127.0.0.1:8545 && echo \"--- priceOf\\(0\\) Espada ---\" && cast call $ADDR \"priceOf\\(uint256\\)\\(uint256\\)\" 0 --rpc-url $RPC && echo \"--- isListed\\(0\\) ---\" && cast call $ADDR \"isListed\\(uint256\\)\\(bool\\)\" 0 --rpc-url $RPC && echo \"--- priceOf\\(1\\) Escudo ---\" && cast call $ADDR \"priceOf\\(uint256\\)\\(uint256\\)\" 1 --rpc-url $RPC && echo \"--- priceOf\\(2\\) Pocion ---\" && cast call $ADDR \"priceOf\\(uint256\\)\\(uint256\\)\" 2 --rpc-url $RPC && echo \"--- isListed\\(99\\) inexistente ---\" && cast call $ADDR \"isListed\\(uint256\\)\\(bool\\)\" 99 --rpc-url $RPC && echo \"--- owner\\(\\) ---\" && cast call $ADDR \"owner\\(\\)\\(address\\)\" --rpc-url $RPC')"
     ]
   }
 }
