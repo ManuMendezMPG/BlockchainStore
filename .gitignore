@@ -1,0 +1,58 @@
+# ─────────────────────────────────────────────────────────────
+# Monorepo .gitignore
+# Un único .gitignore en la raíz cubre las tres piezas que generan
+# artefactos (contracts, bridge, unreal). Es más fácil de mantener
+# que tener uno por carpeta y evita reglas duplicadas.
+# ─────────────────────────────────────────────────────────────
+
+# ── Secretos (válido en cualquier subcarpeta) ──────────────────
+# Nunca commitear ficheros .env reales. Sí versionamos los
+# .env.example, que documentan las variables sin valores.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── Foundry / Solidity (/contracts) ────────────────────────────
+# out/        -> bytecode y ABIs compilados
+# cache/      -> caché de compilación de forge
+# broadcast/  -> logs de transacciones de los scripts de deploy
+#                (pueden contener direcciones/datos sensibles)
+out/
+cache/
+broadcast/
+# lib/ se versiona normalmente como submódulos o vía forge install;
+# si prefieres no versionarlo, descomenta la línea siguiente.
+# lib/
+
+# ── Node.js (/bridge) ──────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnp.*
+dist/
+coverage/
+
+# ── Unreal Engine (/unreal) ────────────────────────────────────
+# Carpetas regenerables que Unreal crea al compilar/abrir el proyecto.
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+# Solución/proyecto del IDE generados por Unreal
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+.vs/
+# Assets binarios pesados: si crecen mucho, considera Git LFS.
+
+# ── Sistema operativo / editores ───────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
