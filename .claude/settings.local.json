@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && forge --version && echo \"--- git ---\" && git --version')",
+      "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && forge init --force --no-git . 2>&1 && echo \"--- tree ---\" && ls -la && echo \"--- src ---\" && ls src test script lib 2>/dev/null')",
+      "PowerShell(wsl -e bash -lc 'cd ~/projects && ls -ld . contracts bridge unreal docs && echo \"--- whoami ---\" && whoami && echo \"--- try passwordless sudo ---\" && sudo -n true 2>&1 && echo \"sudo OK\" || echo \"sudo needs password\"')",
+      "PowerShell(wsl -e bash -lc 'whoami; if sudo -n true 2>/dev/null; then echo \"SUDO_OK\"; else echo \"SUDO_NEEDS_PASSWORD\"; fi')",
+      "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && forge init --force --no-git . 2>&1 && echo \"--- contents ---\" && ls -la && echo \"--- src/test/lib ---\" && ls src test script lib')",
+      "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && rm -f README.md .env.example && ls -la && echo \"--- init ---\" && forge init --no-git . 2>&1 && echo \"--- result ---\" && ls -la && echo \"--- subdirs ---\" && ls src test script lib')",
+      "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 --no-git ; echo \"=== EXIT $? ===\" ; rm -f src/Counter.sol test/Counter.t.sol script/Counter.s.sol ; echo \"--- lib ---\" ; ls lib ; echo \"--- OZ version ---\" ; cat lib/openzeppelin-contracts/package.json 2>/dev/null | grep version | head -1')",
+      "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && echo \"--- foundry.toml ---\" && cat foundry.toml && echo \"\" && echo \"--- forge remappings \\(auto\\) ---\" && forge remappings && echo \"--- lib dir ---\" && ls lib && echo \"--- src/test/script ---\" && ls src test script')",
+      "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && forge test -vv > /tmp/forgetest.log 2>&1 ; echo \"EXIT=$?\"')",
+      "Bash(wsl *)"
+    ]
+  }
+}

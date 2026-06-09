@@ -1,39 +1,63 @@
 # /contracts — Smart contract (Foundry)
 
 Proyecto de Solidity gestionado con [Foundry](https://book.getfoundry.sh/).
-Contendrá el contrato **ERC-1155** que representa los items de la tienda del juego.
+Contiene `GameStore.sol`, un contrato **ERC-1155** que representa los items de la
+tienda del juego. El jugador compra items pagando ETH (de prueba en Anvil) y puede
+quemarlos para vaciar su inventario.
 
-> **Estado:** aún **no** inicializado. Esta carpeta solo tiene este README y un
-> `.env.example`. La inicialización con Foundry se hará más adelante.
-
-## Qué irá aquí
-
-Tras inicializar (`forge init` / estructura estándar de Foundry):
+## Estructura
 
 ```
 contracts/
-├── src/            # Contratos (p. ej. GameItems.sol — ERC-1155)
-├── test/           # Tests en Solidity (forge test)
-├── script/         # Scripts de despliegue (forge script)
-├── lib/            # Dependencias (forge install, p. ej. OpenZeppelin)
-├── foundry.toml    # Configuración de Foundry
-└── .env            # Secretos locales (NO se commitea; ver .env.example)
+├── src/
+│   └── GameStore.sol   # ERC-1155 + ERC1155Burnable + Ownable
+├── test/
+│   └── GameStore.t.sol # Tests (forge test) — 13 casos
+├── script/             # Scripts de despliegue (forge script)
+├── lib/                # Dependencias vendorizadas (openzeppelin-contracts, forge-std)
+├── foundry.toml        # Configuración + remappings + solc
+├── .env.example        # Variables necesarias (ver abajo)
+└── .env                # Secretos locales (NO se commitea)
 ```
 
-## Por qué ERC-1155
+## El contrato `GameStore`
 
-ERC-1155 permite **múltiples tipos de token en un solo contrato**: cada `id` es un
-tipo de item de la tienda y el balance es la cantidad que posee el jugador. Es más
-eficiente en gas que desplegar un ERC-721/ERC-20 por item y soporta transferencias
-por lotes (batch), ideal para inventarios de juego.
+| Pieza | Para qué |
+|-------|----------|
+| `ERC1155` | Multi-token: cada `itemId` es un tipo de item; el balance = unidades poseídas. Un solo contrato para todos los items. |
+| `ERC1155Burnable` | Añade `burn`/`burnBatch` para que el jugador vacíe su inventario (solo sus propios tokens o con aprobación). |
+| `Ownable` | Control de acceso del owner para `setItem` (catálogo) y `withdraw` (recaudación). |
 
-## Próximos pasos (cuando toque inicializar)
+Funciones principales:
+- `setItem(itemId, price)` — *(owner)* da de alta o actualiza el precio de un item.
+- `buy(itemId, quantity)` — *payable*: valida existencia/cantidad/pago y mintea.
+- `burn(account, itemId, amount)` — *(heredada)* el jugador quema sus items.
+- `withdraw()` — *(owner)* retira el ETH recaudado.
 
-1. `forge init` (o crear la estructura a mano para no pisar este README).
-2. `forge install OpenZeppelin/openzeppelin-contracts` para la base ERC-1155.
-3. Implementar `src/GameItems.sol`.
-4. Tests en `test/` y script de deploy en `script/`.
-5. Copiar `.env.example` a `.env` y rellenar los valores reales.
+Errores con **custom errors** (`ItemNotListed`, `InsufficientPayment`,
+`InvalidQuantity`, `NoFundsToWithdraw`, `WithdrawFailed`).
+
+## Dependencias y remappings
+
+OpenZeppelin Contracts **v5.1.0**, vendorizado en `lib/` (sin submódulo git, para
+evitar submódulos anidados dentro del monorepo). Remappings en `foundry.toml`:
+
+```
+@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/
+forge-std/=lib/forge-std/src/
+```
+
+## Comandos
+
+```bash
+forge build          # compilar
+forge test           # ejecutar tests
+forge test -vvv      # tests con trazas detalladas
+anvil                # nodo local (en otra terminal) -> http://127.0.0.1:8545
+```
+
+> Nota de entorno (WSL): si `forge` no está en el PATH, añade
+> `export PATH="$HOME/.foundry/bin:$PATH"`.
 
 > El bytecode/ABIs compilados (`out/`), la caché (`cache/`) y los logs de deploy
 > (`broadcast/`) están ignorados por git (ver `.gitignore` raíz).
