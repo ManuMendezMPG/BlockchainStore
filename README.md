@@ -63,20 +63,72 @@ direcciones de despliegue por red, etc.
 4. La transacción se mina; el contrato actualiza el balance del item para esa wallet.
 5. El puente notifica al juego el resultado; el juego actualiza el inventario en la UI.
 
+## Arranque rápido del entorno local (WSL)
+
+Hay un script que automatiza toda la parte de WSL (Anvil + despliegue) con
+**persistencia de estado**:
+
+```bash
+bash scripts/start-local.sh
+```
+
+Qué hace y por qué (ver comentarios en el propio script):
+
+1. **Arranca Anvil con estado persistente** (`--state .anvil/state.json`, alias de
+   load+dump, más `--state-interval` para volcados periódicos). Así el contrato y el
+   inventario **sobreviven** a apagar y reencender. El estado vive en `.anvil/`, que
+   está fuera de git.
+2. **Espera al RPC con polling real** (no un `sleep` fijo): consulta
+   `cast block-number` en bucle hasta que `http://127.0.0.1:8545` responde de verdad,
+   con un límite de intentos. Si Anvil muere durante el arranque, lo detecta y aborta
+   con las últimas líneas del log.
+3. **Despliega solo si hace falta:** con `cast code` mira si ya hay contrato en la
+   dirección determinista (`0x5FbDB2…0aa3`). Si **no** hay → ejecuta el deploy. Si
+   **sí** hay (estado persistente cargado) → **no redespliega**, para no duplicar el
+   contrato ni machacar el inventario.
+4. **Resumen** con la dirección, si se desplegó o se reutilizó, y los pasos que quedan
+   en Windows.
+5. **Ctrl+C limpio:** un `trap` manda `SIGTERM` a Anvil y espera a que **vuelque el
+   estado** antes de salir.
+
+> Requiere Foundry en WSL. El script añade `~/.foundry/bin` al PATH por si no está.
+
+Después, **en Windows (PowerShell)**, arranca el puente:
+
+```powershell
+cd \\wsl.localhost\Ubuntu\home\manumendez\projects\bridge
+node server.js     # → http://localhost:8787
+```
+
+Abre `http://localhost:8787` y conecta MetaMask (red Anvil, chain id 31337).
+
+> **Reiniciar Anvil:** con persistencia, normalmente el contrato se reutiliza en la
+> misma dirección. Si arrancas una cadena limpia (borrando `.anvil/`), se redespliega.
+> Si MetaMask da *"nonce too high"*, usa **Configuración → Avanzado → Borrar datos de
+> actividad**.
+
+Detalle de **entorno**: Anvil/Foundry corren en **WSL**; Node (el puente) y MetaMask
+en **Windows**. Se comunican por `localhost`, que se comparte entre ambos.
+
 ## Estado actual
 
-Estructura base recién inicializada. **Aún no** se ha inicializado el proyecto
-Foundry ni instalado dependencias de Node. Cada carpeta tiene un README explicando
-qué irá dentro. Consulta el README de cada pieza para los próximos pasos.
+- ✅ `/contracts` — `GameStore` (ERC-1155: tienda, compra, burn, withdraw), 13 tests
+  en verde y script de despliegue verificado contra Anvil.
+- ✅ `/bridge` — web local (Node + ethers.js v6) que conecta MetaMask, lee la tienda y
+  el inventario, compra y vacía items. Verificado de punta a punta.
+- ✅ `/scripts/start-local.sh` — arranque del entorno local con persistencia.
+- ✅ `/docs` — guía de aprendizaje: `01-smart-contract.md`, `02-bridge.md`.
+- ⏳ `/unreal` — pendiente (placeholder; ver `unreal/README.md`).
 
 ## Estructura del repo
 
 ```
 .
-├── contracts/   # Proyecto Foundry (ERC-1155)
+├── contracts/   # Proyecto Foundry (ERC-1155: GameStore)
 ├── bridge/      # Puente web local (Node + ethers.js + MetaMask)
 ├── unreal/      # Placeholder; el proyecto Unreal se sincroniza desde Windows
-├── docs/        # Documentación del proyecto
+├── docs/        # Guía de aprendizaje del proyecto
+├── scripts/     # start-local.sh (arranque del entorno local en WSL)
 ├── .gitignore
 └── README.md
 ```

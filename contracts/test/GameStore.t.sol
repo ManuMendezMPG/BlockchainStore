@@ -82,17 +82,21 @@ contract GameStoreTest is Test {
         store.buy{value: cost}(ITEM_SWORD, qty);
     }
 
-    function test_BuyWithOverpaymentKeepsFunds() public {
+    function test_BuyRefundsExcess() public {
         _listSword();
         uint256 qty = 1;
-        uint256 paid = PRICE + 1 ether; // paga de más
+        uint256 cost = PRICE * qty;
+        uint256 paid = cost + 1 ether; // paga de más
+        uint256 balanceBefore = player.balance;
 
         vm.prank(player);
         store.buy{value: paid}(ITEM_SWORD, qty);
 
         assertEq(store.balanceOf(player, ITEM_SWORD), qty);
-        // Diseño: no se reembolsa el exceso; el contrato lo retiene.
-        assertEq(address(store).balance, paid);
+        // Diseño nuevo: el exceso se REEMBOLSA. El contrato retiene solo el coste...
+        assertEq(address(store).balance, cost, "el contrato solo retiene el coste");
+        // ...y el gasto neto del jugador es exactamente el coste (recuperó el cambio).
+        assertEq(player.balance, balanceBefore - cost, "se devuelve el excedente");
     }
 
     function test_RevertWhen_Underpaying() public {

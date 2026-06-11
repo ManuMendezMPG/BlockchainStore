@@ -26,6 +26,11 @@ broadcast/
 # si prefieres no versionarlo, descomenta la línea siguiente.
 # lib/
 
+# ── Estado local de Anvil (/scripts/start-local.sh) ────────────
+# Estado persistente y logs del nodo local. No se versiona: es estado
+# de tu máquina, puede ser grande y se regenera con un redeploy.
+.anvil/
+
 # ── Node.js (/bridge) ──────────────────────────────────────────
 node_modules/
 npm-debug.log*

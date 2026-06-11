@@ -3,56 +3,66 @@ pragma solidity ^0.8.20;
 
 import {Script, console} from "forge-std/Script.sol";
 import {GameStore} from "../src/GameStore.sol";
+import {Achievements} from "../src/Achievements.sol";
 
-/// @title DeployGameStore — script de despliegue de GameStore en una red local.
-/// @notice Despliega el contrato y precarga el catálogo con 3 items de ejemplo
-///         para que la tienda tenga contenido desde el primer bloque.
-/// @dev Se ejecuta con `forge script`. Todo lo que va entre `vm.startBroadcast()`
-///      y `vm.stopBroadcast()` se convierte en transacciones REALES firmadas por
-///      la cuenta que indiques en la línea de comandos (--private-key / --sender)
-///      y enviadas al --rpc-url. El resto del código (logs, lecturas) NO genera
-///      transacciones: corre solo en la simulación local de forge.
+/// @title DeployGameStore — despliega GameStore + Achievements y los conecta.
+/// @dev ORDEN DE DESPLIEGUE IMPORTANTE:
+///      1) GameStore PRIMERO (nonce 0 de la cuenta #0) → cae en la dirección
+///         determinista 0x5FbDB2315678afecb367f032d93F642f64180aa3 que usa el bridge.
+///      2) Achievements DESPUÉS (nonce 1).
+///      La dirección de un contrato depende de (deployer, nonce) en el momento del
+///      CREATE; las transacciones posteriores (setters, setItem) no la cambian.
 contract DeployGameStore is Script {
-    // ── Catálogo de ejemplo ──────────────────────────────────────────
-    // Precios usando el sufijo `ether` de Solidity, que el compilador convierte
-    // a wei (1 ether = 1e18 wei). Así evitamos escribir los ceros a mano.
-    uint256 internal constant ITEM_SWORD = 0; // "Espada"
-    uint256 internal constant ITEM_SHIELD = 1; // "Escudo"
-    uint256 internal constant ITEM_POTION = 2; // "Poción"
+    // IDs de items.
+    uint256 constant ESPADA = 0;
+    uint256 constant ESCUDO = 1;
+    uint256 constant ARCO = 2;
+    uint256 constant CARCAJ_5 = 3;
+    uint256 constant CARCAJ_10 = 4;
+    uint256 constant CARCAJ_20 = 5;
+    uint256 constant FLECHA = 6;
+    uint256 constant BOTELLA_VACIA = 7;
+    uint256 constant POCION_VIDA = 8;
+    uint256 constant POCION_MANA = 9;
 
-    uint256 internal constant PRICE_SWORD = 0.01 ether; // 10_000_000_000_000_000 wei (1e16)
-    uint256 internal constant PRICE_SHIELD = 0.005 ether; //  5_000_000_000_000_000 wei (5e15)
-    uint256 internal constant PRICE_POTION = 0.001 ether; //  1_000_000_000_000_000 wei (1e15)
-
-    function run() external returns (GameStore store) {
-        // Inicio del "broadcast": a partir de aquí, cada llamada que cambie
-        // estado on-chain se firma y se envía como transacción real.
-        // Sin argumento, usa la cuenta que pasas por CLI (--private-key/--sender),
-        // que será el OWNER del contrato (GameStore es Ownable(msg.sender)).
+    function run() external returns (GameStore store, Achievements achievements) {
         vm.startBroadcast();
 
-        // 1) Desplegar el contrato. El string es la URI base de metadatos ERC-1155;
-        //    `{id}` lo sustituye el cliente por el id del token en hexadecimal.
+        // 1) GameStore primero → dirección determinista para el bridge.
         store = new GameStore("ipfs://game-items/{id}.json");
 
-        // 2) Dar de alta el catálogo. setItem es onlyOwner; funciona porque el
-        //    firmante del broadcast es el owner recién asignado en el constructor.
-        store.setItem(ITEM_SWORD, PRICE_SWORD);
-        store.setItem(ITEM_SHIELD, PRICE_SHIELD);
-        store.setItem(ITEM_POTION, PRICE_POTION);
+        // 2) Achievements después.
+        achievements = new Achievements("ipfs://achievements/{id}.json");
 
-        // Fin del broadcast: lo de abajo ya no genera transacciones.
+        // 3) Conexión entre contratos:
+        //    - GameStore necesita conocer a Achievements para acuñar medallones.
+        //    - Achievements autoriza a GameStore como su único `minter`.
+        store.setAchievements(address(achievements));
+        achievements.setMinter(address(store));
+
+        // 4) Catálogo completo (precios en wei vía sufijo `ether`).
+        store.setItem(ESPADA, 0.01 ether);
+        store.setItem(ESCUDO, 0.008 ether);
+        store.setItem(ARCO, 0.012 ether);
+        store.setItem(CARCAJ_5, 0.005 ether);
+        store.setItem(CARCAJ_10, 0.01 ether);
+        store.setItem(CARCAJ_20, 0.02 ether);
+        store.setItem(FLECHA, 0.0005 ether);
+        store.setItem(BOTELLA_VACIA, 0.002 ether);
+        store.setItem(POCION_VIDA, 0.003 ether);
+        store.setItem(POCION_MANA, 0.003 ether);
+
         vm.stopBroadcast();
 
-        // 3) Logs informativos (solo consola; no son transacciones).
+        // 5) Logs informativos.
         console.log("==========================================");
-        console.log("GameStore desplegado en:", address(store));
-        console.log("Owner del contrato:      ", store.owner());
+        console.log("GameStore    desplegado en:", address(store));
+        console.log("Achievements desplegado en:", address(achievements));
+        console.log("Owner:                     ", store.owner());
+        console.log("Minter de Achievements:    ", achievements.minter());
         console.log("------------------------------------------");
-        console.log("Items dados de alta (precio en wei):");
-        console.log("  id %s (Espada)  precio:", ITEM_SWORD, PRICE_SWORD);
-        console.log("  id %s (Escudo)  precio:", ITEM_SHIELD, PRICE_SHIELD);
-        console.log("  id %s (Pocion)  precio:", ITEM_POTION, PRICE_POTION);
+        console.log("Catalogo: 10 items (ids 0-9) dados de alta.");
+        console.log("Medallones: ARQUERO(0) soulbound, MERCADER(1) transferible, COLECCIONISTA(2) soulbound.");
         console.log("==========================================");
     }
 }
