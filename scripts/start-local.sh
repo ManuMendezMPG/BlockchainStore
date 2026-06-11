@@ -5,9 +5,21 @@
 # Qué hace, en orden:
 #   1. Arranca Anvil con PERSISTENCIA de estado en disco (sobrevive a reinicios).
 #   2. Espera (polling real) a que el RPC responda antes de continuar.
-#   3. Despliega el contrato SOLO si no está ya desplegado (estado persistente).
+#   3. Decide si desplegar según el estado del contrato (ver "Lógica de decisión"):
+#        - sin contrato        → desplegar
+#        - contrato ACTUAL     → reutilizar (no redesplegar)
+#        - contrato ANTIGUO    → reiniciar cadena limpia y redesplegar (avisando)
 #   4. Muestra un resumen y los pasos que quedan en Windows.
 #   5. Maneja Ctrl+C limpiamente para que Anvil vuelque el estado antes de morir.
+#
+# Lógica de decisión (paso 3):
+#   No basta con "¿hay bytecode en la dirección?": el estado persistente puede
+#   tener una versión ANTIGUA del contrato. Por eso, si hay bytecode, además
+#   SONDEAMOS un getter que solo existe en la versión actual (purchasedTotal).
+#     · responde            → versión actual → reutilizar
+#     · revierte (data 0x)  → versión antigua → cadena limpia + redeploy
+#   Redesplegamos en cadena limpia (no sobre el estado viejo) porque la dirección
+#   determinista 0x5FbD...0aa3 solo se obtiene con la cuenta #0 a nonce 0.
 #
 # Pensado para ejecutarse en WSL:  bash scripts/start-local.sh
 # =============================================================================
@@ -22,7 +34,6 @@ set -euo pipefail
 export PATH="$HOME/.foundry/bin:$PATH"
 
 # ── Localizar el repo a partir de la ubicación de ESTE script ────────────────
-# Así el script funciona aunque lo lances desde otra carpeta.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 CONTRACTS_DIR="$REPO_ROOT/contracts"
@@ -35,8 +46,13 @@ ANVIL_DIR="$REPO_ROOT/.anvil"
 STATE_FILE="$ANVIL_DIR/state.json"
 LOG_FILE="$ANVIL_DIR/anvil.log"
 
-# Dirección DETERMINISTA del contrato: primer despliegue de la cuenta #0 (nonce 0).
+# Dirección DETERMINISTA de GameStore: primer despliegue de la cuenta #0 (nonce 0).
 CONTRACT_ADDRESS="0x5FbDB2315678afecb367f032d93F642f64180aa3"
+
+# Getter que SOLO existe en la versión actual de GameStore. Si responde, el
+# contrato desplegado es el actual; si revierte, es una versión anterior.
+VERSION_PROBE_SIG="purchasedTotal(address,uint256)(uint256)"
+ZERO_ADDR="0x0000000000000000000000000000000000000000"
 
 # Cuenta #0 de Anvil. ⚠️ CLAVE PÚBLICA DE PRUEBA, la conoce todo el mundo.
 # Solo para desarrollo local. NUNCA uses una clave real ni le envíes fondos reales.
@@ -48,6 +64,66 @@ info()  { printf '\033[36m▶ %s\033[0m\n' "$*"; }   # cian
 ok()    { printf '\033[32m✓ %s\033[0m\n' "$*"; }   # verde
 warn()  { printf '\033[33m! %s\033[0m\n' "$*"; }   # amarillo
 fail()  { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+
+# ── Funciones reutilizables ──────────────────────────────────────────────────
+
+# Arranca Anvil en segundo plano con persistencia y guarda su PID (global).
+start_anvil() {
+  info "Arrancando Anvil (logs → $LOG_FILE) ..."
+  # --state PATH       : alias de --load-state + --dump-state (carga si existe, vuelca al salir).
+  # --state-interval N : vuelca cada N s (robustez ante kill -9 / cierre abrupto).
+  anvil --state "$STATE_FILE" --state-interval 5 >"$LOG_FILE" 2>&1 &
+  ANVIL_PID=$!
+}
+
+# Polling REAL del RPC (no un sleep fijo): consulta hasta que responde o agota.
+wait_for_rpc() {
+  info "Esperando a que el RPC ($RPC_URL) esté listo ..."
+  local i
+  for i in $(seq 1 50); do            # 50 × 0.2s ≈ 10s máximo
+    if ! kill -0 "$ANVIL_PID" 2>/dev/null; then
+      warn "Anvil terminó inesperadamente. Últimas líneas del log:"
+      tail -n 20 "$LOG_FILE" >&2 || true
+      fail "Anvil no arrancó correctamente."
+    fi
+    if cast block-number --rpc-url "$RPC_URL" >/dev/null 2>&1; then
+      ok "RPC listo."
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "El RPC no respondió a tiempo. Revisa $LOG_FILE."
+}
+
+# Para Anvil de forma ordenada (vuelca el estado) y espera a que termine.
+stop_anvil() {
+  if [ -n "${ANVIL_PID:-}" ] && kill -0 "$ANVIL_PID" 2>/dev/null; then
+    kill -TERM "$ANVIL_PID" 2>/dev/null || true
+    wait "$ANVIL_PID" 2>/dev/null || true
+  fi
+}
+
+# Despliega la versión actual de los contratos (GameStore + Achievements).
+deploy_contracts() {
+  info "Desplegando la versión ACTUAL de los contratos ..."
+  if ( cd "$CONTRACTS_DIR" && forge script "$DEPLOY_SCRIPT" \
+        --rpc-url "$RPC_URL" \
+        --private-key "$DEPLOYER_PK" \
+        --broadcast >>"$LOG_FILE" 2>&1 ); then
+    ok "Contratos desplegados y catálogo inicial creado."
+  else
+    warn "Fallo en el despliegue. Últimas líneas del log:"
+    tail -n 30 "$LOG_FILE" >&2 || true
+    fail "El despliegue con forge script falló."
+  fi
+}
+
+# ¿El contrato desplegado responde al getter de la versión actual?
+# Devuelve 0 (éxito) si responde; ≠0 si revierte / no existe.
+contract_is_current() {
+  cast call "$CONTRACT_ADDRESS" "$VERSION_PROBE_SIG" "$ZERO_ADDR" 0 \
+    --rpc-url "$RPC_URL" >/dev/null 2>&1
+}
 
 # ── 0) Comprobaciones previas: ¿están las herramientas? ──────────────────────
 command -v anvil >/dev/null 2>&1 || fail "No se encuentra 'anvil'. ¿Foundry instalado? Ejecuta 'foundryup'."
@@ -64,86 +140,61 @@ mkdir -p "$ANVIL_DIR"
 
 # ── 5) Limpieza al recibir Ctrl+C / TERM: que Anvil VUELQUE el estado ────────
 # Definimos el trap ANTES de arrancar Anvil. Al pulsar Ctrl+C, en vez de morir
-# de golpe, mandamos SIGTERM a Anvil y ESPERAMOS a que termine: con --state,
-# Anvil vuelca el estado a disco durante su apagado ordenado.
+# de golpe, mandamos SIGTERM a Anvil y ESPERAMOS a que vuelque el estado a disco.
 ANVIL_PID=""
 cleanup() {
   echo
-  if [ -n "$ANVIL_PID" ] && kill -0 "$ANVIL_PID" 2>/dev/null; then
+  if [ -n "${ANVIL_PID:-}" ] && kill -0 "$ANVIL_PID" 2>/dev/null; then
     info "Parando Anvil y volcando estado a $STATE_FILE ..."
-    kill -TERM "$ANVIL_PID" 2>/dev/null || true
-    wait "$ANVIL_PID" 2>/dev/null || true   # esperar al volcado ordenado
+    stop_anvil
     ok "Estado guardado. Hasta la próxima."
   fi
   exit 0
 }
 trap cleanup INT TERM
 
-# ── 1) Arrancar Anvil con persistencia ───────────────────────────────────────
-# --state PATH        : alias de --load-state + --dump-state. Carga el estado del
-#                       fichero si existe, y lo vuelca al salir.
-# --state-interval N  : además, vuelca cada N segundos (robustez si el proceso
-#                       muere de forma abrupta, p. ej. kill -9 o cierre del PC).
+# ── 1+2) Arrancar Anvil y esperar al RPC ─────────────────────────────────────
 if [ -f "$STATE_FILE" ]; then
   info "Estado previo encontrado: $STATE_FILE (se cargará)."
 else
   info "Sin estado previo: se arrancará una cadena limpia y se creará $STATE_FILE."
 fi
+start_anvil
+wait_for_rpc
 
-info "Arrancando Anvil (logs → $LOG_FILE) ..."
-# En segundo plano (&), redirigiendo stdout y stderr al log. Guardamos su PID.
-anvil --state "$STATE_FILE" --state-interval 5 >"$LOG_FILE" 2>&1 &
-ANVIL_PID=$!
-
-# ── 2) Esperar a que el RPC responda DE VERDAD (polling, no sleep fijo) ──────
-# Un 'sleep 3' es frágil: a veces Anvil tarda más, a veces menos. En su lugar
-# consultamos el RPC en bucle hasta que conteste, con un límite de intentos.
-info "Esperando a que el RPC ($RPC_URL) esté listo ..."
-READY=0
-for i in $(seq 1 50); do            # 50 intentos × 0.2s ≈ 10s máximo
-  # ¿Sigue vivo el proceso de Anvil? Si murió, no tiene sentido seguir esperando.
-  if ! kill -0 "$ANVIL_PID" 2>/dev/null; then
-    warn "Anvil terminó inesperadamente. Últimas líneas del log:"
-    tail -n 20 "$LOG_FILE" >&2 || true
-    fail "Anvil no arrancó correctamente."
-  fi
-  # cast block-number devuelve 0 si el RPC responde; si no, reintenta.
-  if cast block-number --rpc-url "$RPC_URL" >/dev/null 2>&1; then
-    READY=1
-    break
-  fi
-  sleep 0.2
-done
-[ "$READY" -eq 1 ] || fail "El RPC no respondió a tiempo. Revisa $LOG_FILE."
-ok "RPC listo."
-
-# ── 3) Desplegar SOLO si hace falta ──────────────────────────────────────────
-# 'cast code <addr>' devuelve el bytecode desplegado en esa dirección, o '0x' si
-# no hay nada. Si ya hay código → el contrato sobrevivió en el estado persistente
-# y NO debemos redeployar (duplicaría el contrato y machacaría el inventario).
-info "Comprobando si el contrato ya existe en $CONTRACT_ADDRESS ..."
+# ── 3) Decidir: desplegar / reutilizar / redesplegar por versión ─────────────
+info "Comprobando el contrato en $CONTRACT_ADDRESS ..."
 CODE="$(cast code "$CONTRACT_ADDRESS" --rpc-url "$RPC_URL" 2>/dev/null || echo "0x")"
 
 DEPLOY_STATUS=""
-if [ "$CODE" != "0x" ] && [ -n "$CODE" ]; then
-  # Ya hay contrato → reutilizamos el estado.
-  DEPLOY_STATUS="reutilizado (estado persistente)"
-  ok "Contrato ya desplegado. Se reutiliza el inventario existente (no se redespliega)."
-else
-  # Cadena limpia o estado nuevo → desplegamos.
+if [ "$CODE" = "0x" ] || [ -z "$CODE" ]; then
+  # (a) No hay bytecode → cadena limpia → desplegar.
   warn "No hay contrato en esa dirección. Desplegando ..."
-  # Ejecutamos forge script desde la carpeta de contratos (necesita foundry.toml).
-  if ( cd "$CONTRACTS_DIR" && forge script "$DEPLOY_SCRIPT" \
-        --rpc-url "$RPC_URL" \
-        --private-key "$DEPLOYER_PK" \
-        --broadcast >>"$LOG_FILE" 2>&1 ); then
-    DEPLOY_STATUS="desplegado ahora"
-    ok "Contrato desplegado y catálogo inicial creado."
-  else
-    warn "Fallo en el despliegue. Últimas líneas del log:"
-    tail -n 30 "$LOG_FILE" >&2 || true
-    fail "El despliegue con forge script falló."
-  fi
+  deploy_contracts
+  DEPLOY_STATUS="desplegado ahora"
+
+elif contract_is_current; then
+  # (b) Hay bytecode y responde el getter actual → versión correcta → reutilizar.
+  ok "Contrato de la versión ACTUAL detectado. Se reutiliza el estado (no se redespliega)."
+  DEPLOY_STATUS="reutilizado (estado persistente)"
+
+else
+  # (c) Hay bytecode pero NO responde el getter actual → versión ANTIGUA.
+  warn "⚠️  Detectado un contrato de VERSIÓN ANTERIOR en el estado persistente."
+  warn "    El inventario/compras de ese estado NO son válidos para el contrato nuevo."
+  warn "    Reiniciando con una CADENA LIMPIA y redesplegando la versión actual ..."
+
+  # Para que el redeploy caiga en la misma dirección determinista hace falta la
+  # cuenta #0 a nonce 0, es decir, una cadena limpia. Paramos Anvil, apartamos el
+  # estado viejo y arrancamos de cero.
+  stop_anvil
+  mv -f "$STATE_FILE" "$STATE_FILE.stale" 2>/dev/null || true
+  warn "    (Estado antiguo guardado como $STATE_FILE.stale por si lo necesitas.)"
+
+  start_anvil          # sin state.json → cadena limpia, nonce 0
+  wait_for_rpc
+  deploy_contracts
+  DEPLOY_STATUS="redesplegado (versión actual; estado antiguo descartado)"
 fi
 
 # ── 4) Resumen claro ─────────────────────────────────────────────────────────
@@ -171,11 +222,9 @@ info "Anvil sigue corriendo. Pulsa Ctrl+C para PARAR y volcar el estado."
 echo
 
 # ── Mantener el script vivo mostrando los logs de Anvil en directo ───────────
-# 'tail -f' deja los logs visibles. Cuando pulses Ctrl+C, el trap 'cleanup' se
-# encarga de parar Anvil de forma ordenada (volcando el estado).
+# 'tail -f' deja los logs visibles. Cuando pulses Ctrl+C, el trap 'cleanup' para
+# Anvil de forma ordenada (volcando el estado).
 tail -n 0 -f "$LOG_FILE" &
 TAIL_PID=$!
-# Esperamos a que Anvil termine (o a que Ctrl+C dispare el trap).
 wait "$ANVIL_PID"
-# Si Anvil terminó por su cuenta, paramos el tail y limpiamos.
 kill "$TAIL_PID" 2>/dev/null || true

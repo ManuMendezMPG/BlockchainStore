@@ -27,21 +27,24 @@ como build UMD desde un CDN (variable global `ethers`). El servidor no usa
 dependencias externas (solo módulos integrados de Node), así que **no hay
 `npm install` ni `node_modules`**.
 
-## El ABI y la dirección del contrato
+## ABIs y direcciones de los contratos
 
-- **ABI** (`public/abi/GameStore.json`): se extrajo del artefacto de Foundry con
+- **ABIs** (`public/abi/GameStore.json` y `public/abi/Achievements.json`): se extraen
+  de los artefactos de Foundry. **Regenéralos siempre que cambies un contrato**:
   ```bash
   cd ../contracts
-  forge inspect src/GameStore.sol:GameStore abi --json > ../bridge/public/abi/GameStore.json
+  forge inspect src/GameStore.sol:GameStore abi --json    > ../bridge/public/abi/GameStore.json
+  forge inspect src/Achievements.sol:Achievements abi --json > ../bridge/public/abi/Achievements.json
   ```
-  Si cambias el contrato y recompilas, vuelve a ejecutar ese comando para
-  regenerarlo.
-- **Dirección del contrato**: está en `public/app.js`, en la constante
-  `CONTRACT_ADDRESS`, claramente señalada. En Anvil es **determinista** (el primer
-  despliegue de la cuenta #0 siempre cae en
-  `0x5FbDB2315678afecb367f032d93F642f64180aa3`). Si despliegas en otra dirección,
-  actualiza esa constante (la dirección aparece en la salida de `forge script` o
-  en `contracts/broadcast/.../run-latest.json`).
+  Incluyen el ABI **completo con los custom errors**, lo que permite que la web
+  muestre los reverts de las reglas de dependencia de forma legible.
+- **Direcciones**: en `public/app.js`, claramente señaladas. En Anvil son
+  **deterministas**:
+  - `GAMESTORE_ADDRESS = 0x5FbDB2315678afecb367f032d93F642f64180aa3` (despliegue nonce 0).
+  - `ACHIEVEMENTS_ADDRESS = 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512` (despliegue nonce 1).
+
+  Si cambias el orden/los despliegues, actualízalas (aparecen en la salida de
+  `forge script` y en `contracts/broadcast/.../run-latest.json`).
 
 ## Cómo arrancar (entorno local de cero)
 
@@ -80,13 +83,34 @@ esquema; por eso necesitamos el servidor HTTP).
 
 ## Qué hace la web
 
+Es un **banco de pruebas del contrato**, no la cara final (eso será Unreal). Solo
+toca lo **on-chain**; el uso de items (gastar/beber/romper) y los slots son de Unreal.
+
 - **Conectar wallet**: `window.ethereum` → muestra cuenta y red; avisa si no es 31337.
-- **Tienda**: lee `priceOf(id)` / `isListed(id)` de cada item (0,1,2) y los muestra.
-- **Comprar**: llama a `buy(id, 1)` con `value = priceOf(id)` → MetaMask pide firma →
-  al confirmarse, refresca el inventario.
-- **Inventario**: lee `balanceOf(cuenta, id)`; el botón **Vaciar** llama a
-  `burn(cuenta, id, balance)`.
-- **Errores visibles**: red incorrecta, firma rechazada, fondos insuficientes,
-  reverts del contrato (decodificados gracias a los custom errors del ABI), etc.
+- **Tienda (10 items)**: lee `priceOf(id)`/`isListed(id)` de los ids 0–9 (espada,
+  escudo, arco, carcaj_5/10/20, flecha, botella_vacia, pocion_vida, pocion_mana).
+- **Comprar con cantidad**: cada item tiene un campo de cantidad; llama a
+  `buy(id, cantidad)` con `value = precio × cantidad`. El contrato reembolsa el
+  excedente automáticamente.
+- **Inventario**: `balanceOf(cuenta, id)` de los 10 items; **Vaciar** llama a
+  `burn(cuenta, id, balance)` (operación on-chain).
+- **Progreso y medallones (solo lectura)**: lee de GameStore los contadores
+  acumulados (`purchasedTotal`, `totalSpent`, `quiverCapacity`) y de Achievements
+  los medallones que posee (`balanceOf`) y la rareza del Mercader. Sirve para
+  **verificar que los logros se acuñan** al cumplir sus condiciones.
+- **Errores legibles**: red incorrecta, firma rechazada, fondos insuficientes, y los
+  reverts de las **reglas de dependencia** (sin arco, carcaj lleno, sin botella, sin
+  el logro ARQUERO…), decodificados gracias al ABI completo con custom errors.
+
+### Probar las reglas de dependencia desde el navegador
+
+| Para ver… | Haz esto | Mensaje esperado |
+|-----------|----------|------------------|
+| Flecha necesita arco | Compra **flecha** sin tener arco | "Necesitas un ARCO…" |
+| Capacidad de carcaj | Compra arco + carcaj_5, intenta comprar **6 flechas** | "No caben: tu carcaj admite 5…" |
+| Botella → poción | Compra **pocion_vida** sin botellas | "Necesitas 1 botella(s) vacía(s)…" |
+| Evolución de carcaj | Compra **carcaj_10** sin tener carcaj_5 | "Necesitas el Carcaj 5…" |
+| Carcaj 20 gateado | Compra **carcaj_20** sin el logro ARQUERO | "El Carcaj 20 requiere el logro ARQUERO…" |
+| Logro ARQUERO | Compra 20 flechas históricas (compra 10, vacía, compra 10) | Medallón ARQUERO ✅ en "Progreso" |
 
 > `node_modules/` está ignorado por git (aunque aquí no se usa).

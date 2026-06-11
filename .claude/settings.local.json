@@ -19,7 +19,8 @@
       "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && forge inspect src/GameStore.sol:GameStore abi --json > /tmp/abi_clean.json 2>/tmp/abi.err; echo EXIT=$?; wc -c /tmp/abi_clean.json; cat /tmp/abi.err')",
       "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && forge test > /tmp/test2.log 2>&1; echo \"EXIT=$?\"')",
       "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && forge test > /tmp/test3.log 2>&1; echo \"EXIT=$?\"')",
-      "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && forge test > /tmp/test4.log 2>&1; echo \"EXIT=$?\"')"
+      "PowerShell(wsl -e bash -lc 'export PATH=\"$HOME/.foundry/bin:$PATH\" && cd ~/projects/contracts && forge test > /tmp/test4.log 2>&1; echo \"EXIT=$?\"')",
+      "PowerShell(node \"$env:TEMP\\\\ethtest\\\\test.js\")"
     ]
   }
 }

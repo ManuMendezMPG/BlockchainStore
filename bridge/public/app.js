@@ -1,65 +1,64 @@
 /* =============================================================================
- * GameStore — lógica del puente web (ethers.js v6)
+ * GameStore — banco de pruebas del contrato (ethers.js v6)
  *
- * Conceptos clave (lee esto antes que el código):
+ * Repaso rápido (más detalle en docs/02-bridge.md):
+ *  - PROVIDER = solo lectura.  SIGNER = puede firmar (la clave vive en MetaMask).
+ *  - READ (view): sin gas, sin popup, usa provider.
+ *  - WRITE (tx): cuesta gas, MetaMask pide firma, hay que esperar a que se mine.
+ *  - payable: el ETH se envía en los overrides { value: <wei> } → llega como msg.value.
  *
- *  - PROVIDER: conexión de SOLO LECTURA a la blockchain. Sirve para consultar
- *    estado (balances, precios, bloques). No puede firmar nada.
- *      · BrowserProvider(window.ethereum): habla a través de MetaMask.
- *      · JsonRpcProvider(url): habla directamente con un nodo RPC (aquí Anvil).
- *
- *  - SIGNER: representa UNA CUENTA concreta y puede FIRMAR transacciones.
- *    Lo obtenemos de MetaMask con provider.getSigner(). La clave privada vive
- *    dentro de MetaMask: el signer solo pide firmas; nunca vemos la clave.
- *
- *  - READ (llamada / "call"): ejecutar una función `view` no cuesta gas, no mina
- *    bloque y no abre MetaMask. Solo lee. Usa un PROVIDER.
- *      ej: await contract.priceOf(0)
- *
- *  - WRITE (transacción): cambia estado on-chain, cuesta gas, MetaMask pide firma
- *    y hay que ESPERAR a que se mine. Usa un SIGNER.
- *      ej: const tx = await contract.buy(0, 1, { value: precio });
- *          await tx.wait();   // esperamos confirmación
- *
- *  - payable + msg.value: para enviar ETH junto a una llamada (como `buy`), se
- *    pasa un objeto de overrides con `{ value: <wei> }`. Ese value llega al
- *    contrato como msg.value.
+ * Este bridge solo toca lo ON-CHAIN (propiedad, economía, dependencias, progreso).
+ * El USO de items (gastar/beber/romper) y los slots son de Unreal: NO van aquí.
  * ===========================================================================*/
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  CONFIGURACIÓN  —  ⚠️ DIRECCIÓN DEL CONTRATO ⚠️
+//  CONFIGURACIÓN  —  ⚠️ DIRECCIONES DE LOS CONTRATOS ⚠️
 // ─────────────────────────────────────────────────────────────────────────────
-// Dirección de GameStore desplegado en Anvil. Es DETERMINISTA: el primer contrato
-// que despliega la cuenta #0 de Anvil (nonce 0) siempre cae en esta dirección.
-//
-// 👉 CÓMO ACTUALIZARLA si cambia (p. ej. si reinicias Anvil y haces más despliegues,
-//    o despliegas desde otra cuenta):
-//    1. Mira la salida de `forge script ... --broadcast` ("GameStore desplegado en: 0x...").
-//    2. O léela de contracts/broadcast/DeployGameStore.s.sol/31337/run-latest.json.
-//    3. Pega aquí la nueva dirección.
-const CONTRACT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
+// GameStore: primer despliegue de la cuenta #0 de Anvil (nonce 0). Determinista.
+const GAMESTORE_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
 
-// Red local Anvil.
+// Achievements: SEGUNDO despliegue de la cuenta #0 (nonce 1). También determinista.
+// 👉 Si cambias el orden/los despliegues, actualiza esta dirección (la imprime
+//    `forge script` y está en contracts/broadcast/.../run-latest.json).
+const ACHIEVEMENTS_ADDRESS = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512";
+
 const RPC_URL = "http://127.0.0.1:8545";
-const EXPECTED_CHAIN_ID = 31337n; // BigInt: en ethers v6 los chainId son BigInt.
+const EXPECTED_CHAIN_ID = 31337n;
 
-// Catálogo a mostrar (los precios reales se LEEN del contrato, no se hardcodean).
+// Catálogo: ids y nombres REALES del contrato (GameStore.ESPADA()=0, etc.).
 const ITEMS = [
   { id: 0, name: "Espada", emoji: "⚔️" },
   { id: 1, name: "Escudo", emoji: "🛡️" },
-  { id: 2, name: "Poción", emoji: "🧪" },
+  { id: 2, name: "Arco", emoji: "🏹" },
+  { id: 3, name: "Carcaj 5", emoji: "🎒" },
+  { id: 4, name: "Carcaj 10", emoji: "🎒" },
+  { id: 5, name: "Carcaj 20", emoji: "🎒" },
+  { id: 6, name: "Flecha", emoji: "➶" },
+  { id: 7, name: "Botella vacía", emoji: "🍶" },
+  { id: 8, name: "Poción de vida", emoji: "❤️" },
+  { id: 9, name: "Poción de maná", emoji: "🔷" },
 ];
+const FLECHA_ID = 6;
+
+// Medallones (ids en el contrato Achievements).
+const MEDALS = [
+  { id: 0, name: "ARQUERO", note: "soulbound · desbloquea Carcaj 20" },
+  { id: 1, name: "MERCADER", note: "transferible · con rareza" },
+  { id: 2, name: "COLECCIONISTA", note: "soulbound · set completo" },
+];
+const RARITY = ["—", "Bronce", "Plata", "Oro"];
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  ESTADO GLOBAL
+//  ESTADO
 // ─────────────────────────────────────────────────────────────────────────────
-let abi = null; // ABI cargado desde ./abi/GameStore.json
-let signer = null; // cuenta firmante (tras conectar MetaMask)
-let account = null; // dirección conectada
-let readContract = null; // contrato conectado a un provider (solo lectura)
-let writeContract = null; // contrato conectado al signer (lectura + escritura)
+let gsAbi = null;
+let achAbi = null;
+let signer = null;
+let account = null;
+let storeRead = null; // GameStore (provider) — lectura
+let storeWrite = null; // GameStore (signer)  — escritura
+let achRead = null; //   Achievements (provider) — lectura
 
-// Atajos al DOM.
 const $ = (id) => document.getElementById(id);
 const els = {
   connectBtn: $("connectBtn"),
@@ -68,52 +67,122 @@ const els = {
   status: $("status"),
   store: $("store"),
   inventory: $("inventory"),
+  progress: $("progress"),
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  UTILIDADES DE UI / ERRORES
+//  UI / ERRORES
 // ─────────────────────────────────────────────────────────────────────────────
 function showStatus(message, kind = "ok") {
   els.status.textContent = message;
-  els.status.className = kind; // ok | warn | error
+  els.status.className = kind;
 }
 function clearStatus() {
   els.status.className = "hidden";
 }
 
+// Interfaces de ethers para decodificar custom errors a partir del selector crudo.
+// Se construyen una vez (perezosamente) desde los ABIs ya cargados.
+let gsIface = null;
+let achIface = null;
+function errorInterfaces() {
+  if (!gsIface && gsAbi) gsIface = new ethers.Interface(gsAbi);
+  if (!achIface && achAbi) achIface = new ethers.Interface(achAbi);
+  return [gsIface, achIface].filter(Boolean);
+}
+
+/** Mensaje legible a partir del nombre del custom error y sus args. */
+function messageForRevert(name, args) {
+  const a = args ?? [];
+  switch (name) {
+    // Economía
+    case "InsufficientPayment":
+      return `Pago insuficiente: hacían falta ${a[0]} wei, enviaste ${a[1]} wei.`;
+    case "InvalidQuantity":
+      return "La cantidad debe ser mayor que cero.";
+    case "ItemNotListed":
+      return `Ese item no existe en el catálogo (id ${a[0]}).`;
+    // Reglas de dependencia
+    case "NeedBow":
+      return "🏹 Necesitas un ARCO antes de comprar flechas.";
+    case "QuiverCapacityExceeded":
+      return `🎒 No caben: tu carcaj admite ${a[0]}, ya llevas ${a[1]} y pides ${a[2]}. Compra un carcaj mayor o usa flechas.`;
+    case "NeedEmptyBottle":
+      return `🍶 Necesitas ${a[0]} botella(s) vacía(s) para esa poción; tienes ${a[1]}.`;
+    case "NeedQuiver5":
+      return "🎒 Necesitas el Carcaj 5 antes de comprar el Carcaj 10.";
+    case "NeedArcheroAchievement":
+      return "🏅 El Carcaj 20 requiere el logro ARQUERO (20 flechas compradas).";
+    // Otros
+    case "ERC1155MissingApprovalForAll":
+      return "No puedes quemar tokens que no son tuyos.";
+    case "RefundFailed":
+      return "Falló el reembolso del excedente.";
+    case "Error": // require(cond, "mensaje")
+      return a[0] ? String(a[0]) : "El contrato revirtió.";
+    default:
+      return name ? `El contrato revirtió: ${name}.` : null;
+  }
+}
+
+/** Rebusca el revert data crudo ("0x........") en las distintas formas del error. */
+function extractRevertData(err) {
+  const candidates = [
+    err?.revert?.data,
+    err?.data,
+    err?.info?.error?.data, // forma típica de MetaMask en estimateGas
+    err?.error?.data,
+    err?.cause?.data,
+    err?.cause?.info?.error?.data,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.startsWith("0x") && c.length >= 10) return c;
+    // A veces el data viene anidado como objeto { data: "0x..." }.
+    if (c && typeof c === "object" && typeof c.data === "string" && c.data.startsWith("0x")) {
+      return c.data;
+    }
+  }
+  return null;
+}
+
 /**
- * Traduce los errores de ethers/MetaMask a mensajes claros para el usuario.
- * ethers v6 normaliza muchos errores con un `code` y, para reverts con custom
- * errors (gracias a que el ABI los incluye), rellena `error.revert`.
+ * Identifica el custom error → { name, args }. Unifica los dos caminos:
+ *  - err.revert.name: ethers ya lo decodificó (tx ejecutada / call de ethers).
+ *  - selector crudo en err.data / err.info.error.data: lo decodificamos nosotros
+ *    con el ABI (caso estimateGas vía MetaMask).
  */
+function parseRevert(err) {
+  if (err?.revert?.name) return { name: err.revert.name, args: err.revert.args };
+
+  const data = extractRevertData(err);
+  if (!data) return null;
+  for (const iface of errorInterfaces()) {
+    try {
+      const parsed = iface.parseError(data); // empareja por selector de 4 bytes
+      if (parsed) return { name: parsed.name, args: parsed.args };
+    } catch (_) {
+      /* este ABI no conoce ese selector; probamos el siguiente */
+    }
+  }
+  return null;
+}
+
+/** Traduce errores de ethers/MetaMask/contrato a mensajes legibles. */
 function humanizeError(err) {
-  // El usuario cerró/rechazó el popup de firma en MetaMask.
   if (err?.code === "ACTION_REJECTED" || err?.info?.error?.code === 4001) {
     return "Has rechazado la firma en MetaMask.";
   }
-  // La cuenta no tiene ETH suficiente para el value + gas.
   if (err?.code === "INSUFFICIENT_FUNDS") {
-    return "Fondos insuficientes en tu cuenta para pagar el item + gas.";
+    return "Fondos insuficientes para pagar el item + gas.";
   }
-  // Revert con custom error decodificado por el ABI.
-  if (err?.revert?.name) {
-    const r = err.revert;
-    switch (r.name) {
-      case "InsufficientPayment":
-        return `Pago insuficiente: el contrato pedía ${r.args?.[0]} wei.`;
-      case "ItemNotListed":
-        return `Ese item no existe en el catálogo (id ${r.args?.[0]}).`;
-      case "InvalidQuantity":
-        return "La cantidad debe ser mayor que cero.";
-      case "ERC1155MissingApprovalForAll":
-        return "No puedes quemar tokens que no son tuyos.";
-      default:
-        return `El contrato revirtió: ${r.name}.`;
-    }
+  // Custom error, venga ya decodificado o solo como selector crudo.
+  const revert = parseRevert(err);
+  if (revert) {
+    const msg = messageForRevert(revert.name, revert.args);
+    if (msg) return msg;
   }
-  // No se pudo contactar con el nodo (Anvil apagado, etc.).
   if (err?.code === "NETWORK_ERROR" || /failed to fetch/i.test(err?.message || "")) {
-    return "No se pudo contactar con la red. ¿Está Anvil arrancado en 127.0.0.1:8545?";
+    return "No se pudo contactar con la red. ¿Está Anvil en 127.0.0.1:8545?";
   }
   return err?.shortMessage || err?.message || "Error desconocido.";
 }
@@ -122,66 +191,56 @@ function humanizeError(err) {
 //  INICIALIZACIÓN
 // ─────────────────────────────────────────────────────────────────────────────
 async function init() {
-  // 1) Cargamos el ABI (extraído de los artefactos de Foundry).
-  abi = await (await fetch("./abi/GameStore.json")).json();
+  // ABIs extraídos de los artefactos de Foundry (incluyen los custom errors).
+  gsAbi = await (await fetch("./abi/GameStore.json")).json();
+  achAbi = await (await fetch("./abi/Achievements.json")).json();
 
-  // 2) Provider de SOLO LECTURA directo a Anvil. Nos permite leer los precios
-  //    de la tienda AUNQUE el usuario todavía no haya conectado MetaMask.
+  // Provider de solo lectura → leemos la tienda aunque no haya wallet conectada.
   const readProvider = new ethers.JsonRpcProvider(RPC_URL);
-  readContract = new ethers.Contract(CONTRACT_ADDRESS, abi, readProvider);
+  storeRead = new ethers.Contract(GAMESTORE_ADDRESS, gsAbi, readProvider);
+  achRead = new ethers.Contract(ACHIEVEMENTS_ADDRESS, achAbi, readProvider);
 
-  // 3) Pintamos la tienda (lecturas).
   await loadStore();
 
-  // 4) ¿Hay MetaMask?
   if (!window.ethereum) {
     showStatus("No se detecta MetaMask. Instálalo para conectar tu wallet.", "warn");
     els.connectBtn.disabled = true;
   }
-
   els.connectBtn.addEventListener("click", connectWallet);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  CONEXIÓN CON METAMASK
+//  CONEXIÓN
 // ─────────────────────────────────────────────────────────────────────────────
 async function connectWallet() {
   try {
     clearStatus();
-    // BrowserProvider envuelve el objeto EIP-1193 que inyecta MetaMask.
     const browserProvider = new ethers.BrowserProvider(window.ethereum);
-
-    // Pide permiso para acceder a las cuentas → abre el popup de MetaMask.
     await browserProvider.send("eth_requestAccounts", []);
-
-    // El signer es la cuenta conectada; con él se firman transacciones.
     signer = await browserProvider.getSigner();
     account = await signer.getAddress();
+    storeWrite = new ethers.Contract(GAMESTORE_ADDRESS, gsAbi, signer);
 
-    // Contrato conectado al SIGNER → puede leer Y escribir (buy/burn).
-    writeContract = new ethers.Contract(CONTRACT_ADDRESS, abi, signer);
-
-    // Comprobamos la red.
     const net = await browserProvider.getNetwork();
-    renderAccount(net);
+    els.account.textContent = `Cuenta: ${account}`;
+    els.network.textContent = `Red: chainId ${net.chainId}${
+      net.chainId === EXPECTED_CHAIN_ID ? " (Anvil ✓)" : " (¡no es Anvil!)"
+    }`;
+    els.connectBtn.textContent = "Wallet conectada";
+    els.connectBtn.disabled = true;
 
-    // Reaccionar a cambios en MetaMask (cuenta o red) recargando.
     window.ethereum.removeListener?.("accountsChanged", onWalletChange);
     window.ethereum.removeListener?.("chainChanged", onWalletChange);
     window.ethereum.on?.("accountsChanged", onWalletChange);
     window.ethereum.on?.("chainChanged", onWalletChange);
 
     if (net.chainId !== EXPECTED_CHAIN_ID) {
-      showStatus(
-        `⚠️ Estás en la red ${net.chainId}. Cambia a Anvil (chain id 31337, RPC ${RPC_URL}).`,
-        "warn"
-      );
-      // Aun así mostramos la tienda; las escrituras fallarán hasta cambiar de red.
+      showStatus(`⚠️ Estás en la red ${net.chainId}. Cambia a Anvil (chain id 31337).`, "warn");
     } else {
-      showStatus(`Conectado a Anvil (31337) como ${account}`, "ok");
+      showStatus(`Conectado a Anvil como ${account}`, "ok");
     }
 
-    await loadInventory();
+    await refreshAll();
   } catch (err) {
     showStatus(humanizeError(err), "error");
     console.error(err);
@@ -189,44 +248,80 @@ async function connectWallet() {
 }
 
 function onWalletChange() {
-  // Lo más simple y robusto: recargar la página al cambiar cuenta o red.
   window.location.reload();
 }
 
-function renderAccount(net) {
-  els.account.textContent = `Cuenta: ${account}`;
-  els.network.textContent = `Red: chainId ${net.chainId}${
-    net.chainId === EXPECTED_CHAIN_ID ? " (Anvil ✓)" : " (¡no es Anvil!)"
-  }`;
-  els.connectBtn.textContent = "Wallet conectada";
-  els.connectBtn.disabled = true;
+async function refreshAll() {
+  // Cada panel se refresca de forma INDEPENDIENTE: si uno falla, el otro no se ve
+  // afectado. Así un problema en "progreso" nunca rompe la tienda ni el inventario.
+  try {
+    await loadInventory();
+  } catch (err) {
+    console.error("loadInventory falló:", err);
+  }
+  try {
+    await loadProgress();
+  } catch (err) {
+    console.error("loadProgress falló:", err);
+  }
+}
+
+/**
+ * Ejecuta una lectura on-chain de forma SEGURA: si revierte (p. ej. el getter no
+ * existe en el contrato desplegado, o Achievements no está conectado), no propaga
+ * el error; devuelve { ok:false } para que la UI muestre "n/d" en ese campo.
+ */
+async function safeRead(label, fn) {
+  try {
+    return { ok: true, value: await fn() };
+  } catch (err) {
+    console.warn(`Lectura fallida (${label}):`, err?.shortMessage || err?.message || err);
+    return { ok: false };
+  }
+}
+
+// Formatea el resultado de safeRead: el valor (vía `fmt`) o "n/d" si falló.
+function fmtRead(r, fmt = (v) => v.toString()) {
+  return r.ok ? fmt(r.value) : "n/d";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  TIENDA  (READ: priceOf / isListed)
+//  TIENDA  (READ priceOf/isListed + compra con CANTIDAD)
 // ─────────────────────────────────────────────────────────────────────────────
 async function loadStore() {
   els.store.innerHTML = "";
   for (const item of ITEMS) {
     try {
-      // Lecturas: no cuestan gas, no abren MetaMask. Devuelven BigInt/bool.
-      const listed = await readContract.isListed(item.id);
-      const price = await readContract.priceOf(item.id); // wei (BigInt)
-      const priceEth = ethers.formatEther(price); // wei → "0.01"
+      const listed = await storeRead.isListed(item.id);
+      const price = await storeRead.priceOf(item.id); // wei (BigInt)
+      const priceEth = ethers.formatEther(price);
 
       const card = document.createElement("div");
       card.className = "card";
       card.innerHTML = `
         <div>
           <strong>${item.emoji} ${item.name}</strong> <span class="muted">(id ${item.id})</span><br/>
-          <span class="muted">${listed ? `${priceEth} ETH` : "no disponible"}</span>
+          <span class="muted">${listed ? `${priceEth} ETH / ud.` : "no disponible"}</span>
         </div>`;
+
+      const actions = document.createElement("div");
+      actions.className = "actions";
+
+      // Campo de CANTIDAD (para comprar varias de golpe, p. ej. flechas).
+      const qty = document.createElement("input");
+      qty.type = "number";
+      qty.min = "1";
+      qty.value = "1";
+      qty.title = "Cantidad";
 
       const btn = document.createElement("button");
       btn.textContent = "Comprar";
       btn.disabled = !listed;
-      btn.addEventListener("click", () => buyItem(item, price));
-      card.appendChild(btn);
+      btn.addEventListener("click", () => buyItem(item, price, qty));
+
+      actions.appendChild(qty);
+      actions.appendChild(btn);
+      card.appendChild(actions);
       els.store.appendChild(card);
     } catch (err) {
       showStatus(humanizeError(err), "error");
@@ -236,29 +331,23 @@ async function loadStore() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  COMPRAR  (WRITE payable: buy(itemId, 1) con value = precio)
+//  COMPRAR  (WRITE payable: buy(itemId, quantity) con value = precio*cantidad)
 // ─────────────────────────────────────────────────────────────────────────────
-async function buyItem(item, priceWei) {
-  if (!writeContract) {
+async function buyItem(item, priceWei, qtyInput) {
+  if (!storeWrite) {
     showStatus("Conecta tu wallet antes de comprar.", "warn");
     return;
   }
+  const quantity = BigInt(parseInt(qtyInput.value, 10) || 1);
+  const value = priceWei * quantity; // coste exacto; el contrato reembolsa el excedente
+
   try {
-    showStatus(`Confirma en MetaMask la compra de ${item.name}…`, "warn");
-
-    // Construcción de la transacción payable:
-    //   - args de la función: (itemId, quantity)
-    //   - overrides: { value } → se envía como msg.value (en wei).
-    // Al llamar, MetaMask abre el popup para firmar.
-    const tx = await writeContract.buy(item.id, 1, { value: priceWei });
-
-    showStatus(`Transacción enviada (${tx.hash.slice(0, 10)}…). Esperando confirmación…`, "warn");
-
-    // Esperamos a que se mine. En Anvil es instantáneo.
+    showStatus(`Confirma en MetaMask: comprar ${quantity} × ${item.name}…`, "warn");
+    const tx = await storeWrite.buy(item.id, quantity, { value });
+    showStatus(`Tx enviada (${tx.hash.slice(0, 10)}…). Esperando confirmación…`, "warn");
     await tx.wait();
-
-    showStatus(`✅ Has comprado 1 ${item.name}.`, "ok");
-    await loadInventory(); // refrescamos el inventario tras la compra
+    showStatus(`✅ Compradas ${quantity} × ${item.name}.`, "ok");
+    await refreshAll();
   } catch (err) {
     showStatus(humanizeError(err), "error");
     console.error(err);
@@ -266,16 +355,14 @@ async function buyItem(item, priceWei) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  INVENTARIO  (READ: balanceOf)  +  VACIAR  (WRITE: burn)
+//  INVENTARIO  (READ balanceOf)  +  VACIAR (WRITE burn — operación on-chain)
 // ─────────────────────────────────────────────────────────────────────────────
 async function loadInventory() {
   if (!account) return;
   els.inventory.innerHTML = "";
-
   for (const item of ITEMS) {
     try {
-      // balanceOf(cuenta, id) → cuántas unidades posee el jugador (BigInt).
-      const balance = await readContract.balanceOf(account, item.id);
+      const balance = await storeRead.balanceOf(account, item.id);
 
       const card = document.createElement("div");
       card.className = "card";
@@ -287,7 +374,7 @@ async function loadInventory() {
 
       const btn = document.createElement("button");
       btn.textContent = "Vaciar";
-      btn.disabled = balance === 0n; // nada que quemar
+      btn.disabled = balance === 0n;
       btn.addEventListener("click", () => emptyItem(item, balance));
       card.appendChild(btn);
       els.inventory.appendChild(card);
@@ -299,24 +386,74 @@ async function loadInventory() {
 }
 
 async function emptyItem(item, balance) {
-  if (!writeContract) return;
+  if (!storeWrite) return;
   try {
-    showStatus(`Confirma en MetaMask la quema de tus ${item.name}…`, "warn");
-
-    // burn(account, id, value): quemamos TODO el balance de ese item.
-    // No es payable → no lleva { value }. El jugador quema sus propios tokens.
-    const tx = await writeContract.burn(account, item.id, balance);
-
-    showStatus(`Transacción enviada (${tx.hash.slice(0, 10)}…). Esperando confirmación…`, "warn");
+    showStatus(`Confirma en MetaMask: quemar tus ${item.name}…`, "warn");
+    const tx = await storeWrite.burn(account, item.id, balance);
     await tx.wait();
-
-    showStatus(`🔥 Has vaciado tus ${item.name}.`, "ok");
-    await loadInventory();
+    showStatus(`🔥 Vaciados tus ${item.name}.`, "ok");
+    await refreshAll();
   } catch (err) {
     showStatus(humanizeError(err), "error");
     console.error(err);
   }
 }
 
-// Arrancamos cuando el DOM está listo.
+// ─────────────────────────────────────────────────────────────────────────────
+//  PROGRESO Y MEDALLONES  (SOLO LECTURA — para verificar reglas y logros)
+// ─────────────────────────────────────────────────────────────────────────────
+async function loadProgress() {
+  if (!account) return;
+
+  // Cada lectura va envuelta en safeRead: un fallo concreto muestra "n/d" en ese
+  // campo, pero NO rompe el resto del panel ni el refresco general.
+  // (GameStore: contadores/umbrales; Achievements: medallones y rareza.)
+  const arrowsBought = await safeRead("purchasedTotal", () => storeRead.purchasedTotal(account, FLECHA_ID));
+  const spent = await safeRead("totalSpent", () => storeRead.totalSpent(account));
+  const capacity = await safeRead("quiverCapacity", () => storeRead.quiverCapacity(account));
+  const arqueroGoal = await safeRead("ARQUERO_ARROWS", () => storeRead.ARQUERO_ARROWS());
+  const mercaderGoal = await safeRead("MERCADER_SPEND_THRESHOLD", () => storeRead.MERCADER_SPEND_THRESHOLD());
+  const rarity = await safeRead("mercaderRarity", () => achRead.mercaderRarity(account));
+
+  // Medallones: cada balance por separado.
+  const medalReads = {};
+  for (const m of MEDALS) {
+    medalReads[m.id] = await safeRead(`medal:${m.name}`, () => achRead.balanceOf(account, m.id));
+  }
+
+  const eth = (v) => `${ethers.formatEther(v)} ETH`;
+  const arrowsLabel = `${fmtRead(arrowsBought)} / ${fmtRead(arqueroGoal)}`;
+
+  const medalsHtml = MEDALS.map((m) => {
+    const r = medalReads[m.id];
+    let badge;
+    if (!r.ok) {
+      badge = "n/d";
+    } else if (r.value > 0n) {
+      const extra = m.id === 1 && rarity.ok ? ` — rareza ${RARITY[Number(rarity.value)] ?? "?"}` : "";
+      badge = "✅ obtenido" + extra;
+    } else {
+      badge = "🔒 bloqueado";
+    }
+    return `<div class="card">
+      <div><strong>${m.name}</strong> <span class="muted">(id ${m.id} · ${m.note})</span></div>
+      <span class="badge">${badge}</span>
+    </div>`;
+  }).join("");
+
+  els.progress.className = "";
+  els.progress.innerHTML = `
+    <div class="grid2" style="margin-bottom:1rem">
+      <div>Flechas compradas (históricas): <strong>${arrowsLabel}</strong></div>
+      <div>Capacidad de carcaj: <strong>${fmtRead(capacity)}</strong></div>
+      <div>Gasto acumulado: <strong>${fmtRead(spent, eth)}</strong></div>
+      <div>Umbral Mercader: <strong>${fmtRead(mercaderGoal, eth)}</strong></div>
+    </div>
+    ${medalsHtml}
+    <p class="muted">Lectura directa de los contratos. Si ves "n/d", ese getter no
+    respondió (típicamente: el contrato desplegado es una versión antigua, o
+    Achievements no está desplegado/conectado). Compra para ver avanzar los
+    contadores y acuñarse los medallones.</p>`;
+}
+
 window.addEventListener("DOMContentLoaded", init);
