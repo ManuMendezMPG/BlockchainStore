@@ -12,12 +12,13 @@ llamadas; MetaMask custodia la clave y firma. No hay ninguna clave en el código
 
 ```
 bridge/
-├── server.js                 # Servidor estático mínimo (Node, sin dependencias)
+├── server.js                 # Sirve la web estática + API JSON /api/* (Node, sin dependencias)
 ├── public/
 │   ├── index.html            # Estructura + estilos + carga de ethers.js (CDN)
-│   ├── app.js                # Lógica: conectar, leer tienda/inventario, comprar, quemar
+│   ├── app.js                # Web: conectar, leer/comprar/quemar + consumidor de intenciones
 │   └── abi/
-│       └── GameStore.json    # ABI extraído de los artefactos de Foundry
+│       ├── GameStore.json    # ABI extraído de los artefactos de Foundry
+│       └── Achievements.json
 ├── .env.example
 └── README.md
 ```
@@ -112,5 +113,75 @@ toca lo **on-chain**; el uso de items (gastar/beber/romper) y los slots son de U
 | Evolución de carcaj | Compra **carcaj_10** sin tener carcaj_5 | "Necesitas el Carcaj 5…" |
 | Carcaj 20 gateado | Compra **carcaj_20** sin el logro ARQUERO | "El Carcaj 20 requiere el logro ARQUERO…" |
 | Logro ARQUERO | Compra 20 flechas históricas (compra 10, vacía, compra 10) | Medallón ARQUERO ✅ en "Progreso" |
+
+## API HTTP para clientes externos (Unreal)
+
+Además de la web, el servidor expone una **API JSON en `/api/*`** para que un cliente
+que **no puede firmar con MetaMask** (el juego de Unreal) interactúe con la cadena. La
+API está separada de servir la web estática y lleva cabeceras **CORS** (`*`) para que
+un cliente local pueda llamarla.
+
+> El servidor **nunca** maneja claves: las lecturas las hace con un provider de solo
+> lectura (eth_call); las compras solo las COORDINA (la firma sigue en MetaMask). Las
+> intenciones se guardan **en memoria** (un `Map`): **se pierden al reiniciar** el server.
+
+### Lecturas (el servidor consulta la cadena y responde JSON)
+
+| Endpoint | Devuelve |
+|----------|----------|
+| `GET /api/catalog` | Los 10 items con `id`, `name`, `priceWei`, `priceEth`. |
+| `GET /api/inventory?address=0x…` | Balance de cada item para esa dirección. |
+| `GET /api/progress?address=0x…` | `arrowsPurchased`, `totalSpent`, `quiverCapacity` y los medallones (con rareza del Mercader). |
+
+### Compra (patrón pending → firma en web → done)
+
+| Endpoint | Quién | Para qué |
+|----------|-------|----------|
+| `POST /api/purchase-intent` `{address,itemId,quantity}` | Unreal | Registra una intención; devuelve `{requestId}` (status `pending`). |
+| `GET /api/purchase-status?requestId=…` | Unreal | Hace polling: `pending` → `signing` → `done` (con `txHash`) o `error`. |
+| `GET /api/pending` | La web | Lista las intenciones aún `pending`. |
+| `POST /api/purchase-result` `{requestId,status,txHash?,error?}` | La web | Marca `signing` (al reclamarla) y luego `done`/`error`. |
+
+### Flujo de una compra entre los tres actores
+
+```
+UNREAL                         BRIDGE (server)                 WEB + MetaMask
+  │  POST /purchase-intent ───────►  guarda {pending} ──┐
+  │  ◄── { requestId }              (Map en memoria)    │
+  │                                                     │  GET /pending ──► ve la intención
+  │                                 marca signing ◄───── POST /purchase-result {signing}
+  │                                                     │  dispara MetaMask → el jugador FIRMA buy()
+  │  GET /purchase-status ──► signing                   │  espera a que se mine la tx
+  │                                 marca done+txHash ◄─ POST /purchase-result {done, txHash}
+  │  GET /purchase-status ──► done, txHash ✓            │
+```
+
+La web atiende esto automáticamente: al conectar, `app.js` sondea `/api/pending` cada
+3 s y procesa las intenciones **de la cuenta conectada** (reclama → firma → reporta).
+
+### Probar la API con curl (antes de meter Unreal)
+
+> Nota de entorno: el server corre en **Windows**; usa `localhost` desde una terminal
+> de Windows (PowerShell). Desde WSL, `localhost` no alcanza al server de Windows.
+
+```bash
+A=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+# Lecturas
+curl "http://localhost:8787/api/catalog"
+curl "http://localhost:8787/api/inventory?address=$A"
+curl "http://localhost:8787/api/progress?address=$A"
+# Compra: Unreal registra la intención
+curl -X POST "http://localhost:8787/api/purchase-intent" \
+     -H "Content-Type: application/json" \
+     -d "{\"address\":\"$A\",\"itemId\":2,\"quantity\":1}"     # → { requestId }
+# (la WEB abierta en el navegador la firma sola; o simúlala con curl:)
+curl "http://localhost:8787/api/pending"
+curl -X POST "http://localhost:8787/api/purchase-result" -H "Content-Type: application/json" \
+     -d '{"requestId":"<RID>","status":"signing"}'
+curl -X POST "http://localhost:8787/api/purchase-result" -H "Content-Type: application/json" \
+     -d '{"requestId":"<RID>","status":"done","txHash":"0x..."}'
+# Unreal hace polling
+curl "http://localhost:8787/api/purchase-status?requestId=<RID>"
+```
 
 > `node_modules/` está ignorado por git (aunque aquí no se usa).

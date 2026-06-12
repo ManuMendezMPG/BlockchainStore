@@ -241,6 +241,7 @@ async function connectWallet() {
     }
 
     await refreshAll();
+    startIntentPolling(); // empieza a atender compras pedidas por Unreal
   } catch (err) {
     showStatus(humanizeError(err), "error");
     console.error(err);
@@ -249,6 +250,73 @@ async function connectWallet() {
 
 function onWalletChange() {
   window.location.reload();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  CONSUMIDOR DE INTENCIONES (patrón pending → firma en web → done)
+//
+//  Unreal no puede firmar, así que registra una intención en el servidor. ESTA
+//  web (con MetaMask) la recoge, dispara la firma y reporta el resultado. Así, el
+//  juego "compra" aunque la clave nunca salga de MetaMask en el navegador.
+// ─────────────────────────────────────────────────────────────────────────────
+const inFlight = new Set(); // requestIds que ya estamos procesando (anti-duplicado)
+let intentTimer = null;
+
+function startIntentPolling() {
+  if (intentTimer) return;
+  intentTimer = setInterval(pollPending, 3000); // sondeo cada 3 s
+}
+
+async function pollPending() {
+  if (!storeWrite || !account) return;
+  let pending;
+  try {
+    pending = (await (await fetch("/api/pending")).json()).pending || [];
+  } catch {
+    return; // si el servidor no responde, reintentamos en el siguiente tick
+  }
+  for (const intent of pending) {
+    if (inFlight.has(intent.requestId)) continue;
+    // Solo firmamos intenciones de la cuenta CONECTADA (no las de otros jugadores).
+    if (intent.address.toLowerCase() !== account.toLowerCase()) continue;
+    inFlight.add(intent.requestId); // marca síncrona: evita que el siguiente tick la repita
+    processIntent(intent); // sin await: cada compra sigue su curso en paralelo
+  }
+}
+
+async function reportResult(requestId, status, extra = {}) {
+  try {
+    await fetch("/api/purchase-result", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId, status, ...extra }),
+    });
+  } catch (e) {
+    console.error("No se pudo reportar el resultado al servidor:", e);
+  }
+}
+
+async function processIntent(intent) {
+  const item = ITEMS.find((i) => i.id === intent.itemId) || { name: `item ${intent.itemId}` };
+  try {
+    await reportResult(intent.requestId, "signing"); // reclamar: deja de salir en /api/pending
+    showStatus(`Unreal pidió ${intent.quantity} × ${item.name}. Confirma en MetaMask…`, "warn");
+
+    const price = await storeRead.priceOf(intent.itemId);
+    const value = price * BigInt(intent.quantity);
+    const tx = await storeWrite.buy(intent.itemId, intent.quantity, { value });
+    await tx.wait();
+
+    await reportResult(intent.requestId, "done", { txHash: tx.hash });
+    showStatus(`✅ Compra de Unreal completada: ${intent.quantity} × ${item.name}.`, "ok");
+    await refreshAll();
+  } catch (err) {
+    const msg = humanizeError(err);
+    await reportResult(intent.requestId, "error", { error: msg });
+    showStatus(`❌ Compra de Unreal fallida (${item.name}): ${msg}`, "error");
+  } finally {
+    inFlight.delete(intent.requestId);
+  }
 }
 
 async function refreshAll() {
