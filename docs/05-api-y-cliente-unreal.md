@@ -1,7 +1,7 @@
 # 05 — La capa de comunicación: API del bridge y cliente Unreal
 
 > Parte de la guía de aprendizaje del proyecto.
-> [01](./01-smart-contract.md) · [02](./02-bridge.md) · [03](./03-logros-y-dependencias.md) · [04](./04-depuracion-y-aprendizajes.md).
+> [01](./01-smart-contract.md) · [02](./02-bridge.md) · [03](./03-logros-y-dependencias.md) · [04](./04-depuracion-y-aprendizajes.md) · [06](./06-login-siwe.md).
 > Aquí documentamos **cómo habla el juego con la blockchain**: el patrón de tres
 > actores, la API HTTP del bridge, y el plan para conectar Unreal. Con los porqués.
 

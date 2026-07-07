@@ -1,0 +1,15 @@
+{
+  "name": "gamestore-bridge",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Puente local: sirve la web + API HTTP (lecturas, compras y login SIWE) entre el juego y la blockchain.",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "siwe": "^2.3.2",
+    "ethers": "^6.13.4"
+  }
+}

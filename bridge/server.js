@@ -27,6 +27,10 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+// Dependencias para SIWE: la verificación criptográfica de firmas DEBE usar
+// librerías probadas, no código casero. (Ver README: rompe el "cero dependencias".)
+const { SiweMessage, generateNonce } = require("siwe");
+const ethers = require("ethers");
 
 const PORT = process.env.PORT || 8787;
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -35,6 +39,11 @@ const RPC_URL = process.env.RPC_URL || "http://127.0.0.1:8545";
 // Direcciones deterministas (las mismas que usa public/app.js).
 const GAMESTORE_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
 const ACHIEVEMENTS_ADDRESS = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512";
+
+// Config SIWE (EIP-4361). El `domain` debe coincidir al construir y al verificar.
+const SIWE_DOMAIN = "localhost:8787";
+const SIWE_URI = "http://localhost:8787";
+const CHAIN_ID = 31337; // Anvil
 
 // Catálogo (ids y nombres reales del contrato).
 const ITEMS = [
@@ -70,6 +79,10 @@ const SEL = {
 
 // Buzón de intenciones de compra (EN MEMORIA → se pierde al reiniciar).
 const intents = new Map();
+
+// Sesiones de login SIWE y nonces emitidos (también EN MEMORIA).
+const loginSessions = new Map(); // requestId → { address, nonce, message, status, ... }
+const issuedNonces = new Map(); //  nonce → { used: boolean }  (single-use)
 
 // ─────────────────────────── JSON-RPC / lectura ──────────────────────────────
 
@@ -283,6 +296,123 @@ async function handleApi(req, res, u) {
     if (txHash) intent.txHash = txHash;
     if (error) intent.error = error;
     return sendJson(res, 200, { ok: true, status: intent.status });
+  }
+
+  // ── SIWE: nonce suelto (para clientes que construyan su propio mensaje) ─────
+  if (route === "GET /api/siwe/nonce") {
+    const nonce = generateNonce();
+    issuedNonces.set(nonce, { used: false });
+    return sendJson(res, 200, { nonce });
+  }
+
+  // ── SIWE: Unreal registra una intención de login ───────────────────────────
+  if (route === "POST /api/siwe/login-intent") {
+    const body = await readJsonBody(req);
+    let address;
+    try {
+      address = ethers.getAddress(body.address); // valida + checksum EIP-55 (o lanza)
+    } catch {
+      return sendJson(res, 400, { error: "address inválida" });
+    }
+
+    const nonce = generateNonce();
+    issuedNonces.set(nonce, { used: false });
+
+    // Construimos el mensaje EIP-4361 en el servidor (la web firmará ESTE mensaje).
+    const siwe = new SiweMessage({
+      domain: SIWE_DOMAIN,
+      address,
+      statement: "Inicia sesion en GameStore (demo). Firmar no cuesta gas.",
+      uri: SIWE_URI,
+      version: "1",
+      chainId: CHAIN_ID,
+      nonce,
+      issuedAt: new Date().toISOString(),
+    });
+    const message = siwe.prepareMessage();
+
+    const requestId = crypto.randomUUID();
+    loginSessions.set(requestId, {
+      requestId,
+      address,
+      nonce,
+      message,
+      status: "pending",
+      error: null,
+      createdAt: Date.now(),
+    });
+    return sendJson(res, 201, { requestId, message });
+  }
+
+  // ── SIWE: Unreal consulta el estado (polling) ───────────────────────────────
+  if (route === "GET /api/siwe/login-status") {
+    const s = loginSessions.get(u.searchParams.get("requestId"));
+    if (!s) return sendJson(res, 404, { error: "requestId desconocido" });
+    return sendJson(res, 200, {
+      status: s.status,
+      address: s.status === "done" ? s.address : undefined,
+      error: s.error,
+    });
+  }
+
+  // ── SIWE: la WEB descubre logins pendientes (claim-on-read → signing) ───────
+  // Al devolverlos los marcamos "signing": así dejan de ofrecerse y dos pestañas
+  // no firman el mismo login (igual idea que "signing" en las compras).
+  if (route === "GET /api/siwe/pending") {
+    const pending = [];
+    for (const s of loginSessions.values()) {
+      if (s.status === "pending") {
+        s.status = "signing";
+        pending.push({ requestId: s.requestId, address: s.address, message: s.message });
+      }
+    }
+    return sendJson(res, 200, { pending });
+  }
+
+  // ── SIWE: la WEB reporta la firma → el bridge VERIFICA criptográficamente ───
+  if (route === "POST /api/siwe/verify") {
+    const body = await readJsonBody(req);
+    const { requestId, signature, error: clientError } = body;
+    const s = loginSessions.get(requestId);
+    if (!s) return sendJson(res, 404, { error: "requestId desconocido" });
+
+    // La web puede reportar un fallo (p. ej. el usuario rechazó la firma).
+    if (clientError) {
+      s.status = "error";
+      s.error = String(clientError);
+      return sendJson(res, 200, { ok: false, status: "error" });
+    }
+    if (typeof signature !== "string") return sendJson(res, 400, { error: "falta signature" });
+
+    // Nonce de un solo uso: si no existe o ya se usó, rechazamos (anti-repetición).
+    const nrec = issuedNonces.get(s.nonce);
+    if (!nrec || nrec.used) {
+      s.status = "error";
+      s.error = "nonce inválido o ya usado";
+      return sendJson(res, 400, { error: s.error });
+    }
+
+    try {
+      // Re-parseamos el mensaje EXACTO que emitimos y verificamos la firma.
+      // siwe.verify hace ecrecover (con ethers): del mensaje + firma recupera la
+      // dirección firmante y la compara con la `address` del mensaje; además
+      // comprueba que el nonce y el domain coinciden con los esperados.
+      const siwe = new SiweMessage(s.message);
+      const result = await siwe.verify({ signature, nonce: s.nonce, domain: SIWE_DOMAIN });
+      if (!result.success) throw new Error("firma no válida");
+      if (siwe.chainId !== CHAIN_ID) throw new Error("chainId incorrecto");
+
+      nrec.used = true; // NONCE QUEMADO: no se puede reutilizar
+      s.status = "done";
+      s.address = siwe.address;
+      return sendJson(res, 200, { ok: true, address: siwe.address });
+    } catch (e) {
+      // siwe.verify rechaza con un objeto {success:false, error:{type}} en vez de Error.
+      const reason = e?.error?.type || e?.message || "verificación fallida";
+      s.status = "error";
+      s.error = reason;
+      return sendJson(res, 401, { error: reason });
+    }
   }
 
   return sendJson(res, 404, { error: `ruta no encontrada: ${route}` });

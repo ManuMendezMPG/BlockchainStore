@@ -264,7 +264,11 @@ let intentTimer = null;
 
 function startIntentPolling() {
   if (intentTimer) return;
-  intentTimer = setInterval(pollPending, 3000); // sondeo cada 3 s
+  // Cada 3 s atendemos tanto compras como logins SIWE pendientes de Unreal.
+  intentTimer = setInterval(() => {
+    pollPending();
+    pollLogins();
+  }, 3000);
 }
 
 async function pollPending() {
@@ -316,6 +320,57 @@ async function processIntent(intent) {
     showStatus(`❌ Compra de Unreal fallida (${item.name}): ${msg}`, "error");
   } finally {
     inFlight.delete(intent.requestId);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  CONSUMIDOR DE LOGIN SIWE (firma de un MENSAJE, sin gas)
+//
+//  A diferencia de comprar (firma una TRANSACCIÓN), el login SIWE firma un
+//  MENSAJE EIP-4361 con personal_sign: prueba la propiedad de la wallet sin gas
+//  ni tocar la cadena. El bridge construye el mensaje, la web lo firma, el bridge
+//  lo verifica (ecrecover).
+// ─────────────────────────────────────────────────────────────────────────────
+const loginInFlight = new Set();
+
+async function pollLogins() {
+  if (!signer || !account) return;
+  let pending;
+  try {
+    pending = (await (await fetch("/api/siwe/pending")).json()).pending || [];
+  } catch {
+    return;
+  }
+  for (const s of pending) {
+    if (loginInFlight.has(s.requestId)) continue;
+    if (s.address.toLowerCase() !== account.toLowerCase()) continue; // solo nuestra cuenta
+    loginInFlight.add(s.requestId);
+    processLogin(s);
+  }
+}
+
+async function reportLogin(requestId, payload) {
+  await fetch("/api/siwe/verify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ requestId, ...payload }),
+  });
+}
+
+async function processLogin(session) {
+  try {
+    showStatus("Unreal pidió iniciar sesión. Firma el MENSAJE en MetaMask (sin gas)…", "warn");
+    // signMessage = personal_sign del mensaje SIWE exacto que emitió el bridge.
+    const signature = await signer.signMessage(session.message);
+    await reportLogin(session.requestId, { signature }); // el bridge verifica con ecrecover
+    showStatus("✅ Login verificado por el bridge (firma válida).", "ok");
+  } catch (err) {
+    // p. ej. el usuario rechazó la firma: reportamos el error para no dejarlo colgado.
+    const msg = humanizeError(err);
+    await reportLogin(session.requestId, { error: msg });
+    showStatus(`❌ Login no firmado: ${msg}`, "error");
+  } finally {
+    loginInFlight.delete(session.requestId);
   }
 }
 

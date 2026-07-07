@@ -12,7 +12,7 @@ llamadas; MetaMask custodia la clave y firma. No hay ninguna clave en el código
 
 ```
 bridge/
-├── server.js                 # Sirve la web estática + API JSON /api/* (Node, sin dependencias)
+├── server.js                 # Sirve la web estática + API JSON /api/* (Node + siwe + ethers; requiere npm install)
 ├── public/
 │   ├── index.html            # Estructura + estilos + carga de ethers.js (CDN)
 │   ├── app.js                # Web: conectar, leer/comprar/quemar + consumidor de intenciones
@@ -23,10 +23,57 @@ bridge/
 └── README.md
 ```
 
-Stack **mínimo**: HTML + JS, sin framework ni bundler. `ethers.js v6` se carga
-como build UMD desde un CDN (variable global `ethers`). El servidor no usa
-dependencias externas (solo módulos integrados de Node), así que **no hay
-`npm install` ni `node_modules`**.
+Stack **mínimo**: HTML + JS, sin framework ni bundler. `ethers.js v6` se carga en el
+navegador como build UMD desde un CDN (variable global `ethers`).
+
+### Dependencias del servidor (cambio respecto al "cero dependencias")
+
+Hasta el login SIWE, el servidor no usaba dependencias. Al añadir SIWE, el `server.js`
+**sí** usa dos paquetes npm:
+
+- **`siwe`** — construye y, sobre todo, **verifica** los mensajes EIP-4361.
+- **`ethers`** — utilidades de criptografía/direcciones que usa la verificación.
+
+**Por qué se rompe el cero-dependencias a propósito:** la verificación criptográfica de
+firmas (ecrecover, parseo EIP-4361, comprobaciones de nonce/domain) **debe apoyarse en
+librerías probadas y auditadas, no en código casero** — un fallo aquí es un fallo de
+seguridad. Las lecturas siguen sin librerías (eth_call crudo); solo SIWE trae deps.
+
+### Arranque (recomendado): `start-bridge.ps1`
+
+Hay un script de arranque para Windows que **instala las dependencias solo cuando hace
+falta** y luego arranca el server:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu\home\manumendez\projects\bridge\start-bridge.ps1
+# o, situado en la carpeta bridge:
+.\start-bridge.ps1
+```
+
+Qué hace:
+1. Comprueba que Node está disponible.
+2. Decide si instalar dependencias:
+   - **no existe `node_modules`** (primer arranque) → `npm install`;
+   - **`package.json` es más reciente que `package-lock.json`** (cambiaron las deps) →
+     `npm install`;
+   - en otro caso → **no reinstala** (va directo al server).
+3. Arranca `node server.js` (Ctrl+C para parar).
+
+**Primer arranque vs siguientes:** el primero hace `npm install` (crea `node_modules`,
+tarda unos segundos); los siguientes ven las deps al día y arrancan directos.
+
+### Arranque manual (alternativa)
+
+Si prefieres hacerlo a mano:
+
+```powershell
+cd \\wsl.localhost\Ubuntu\home\manumendez\projects\bridge
+npm install      # solo la 1ª vez o cuando cambian las dependencias
+node server.js
+```
+
+> `node_modules/` está en `.gitignore`. Node está en **Windows**, así que el script,
+> `npm install` y `node server.js` se ejecutan **en Windows** (PowerShell).
 
 ## ABIs y direcciones de los contratos
 
@@ -70,7 +117,9 @@ esquema; por eso necesitamos el servidor HTTP).
 > carpeta `bridge`, o desde WSL si instalas Node allí. `localhost` se comparte
 > entre Windows y WSL, así que el navegador lo verá igual.
 >
-> Puerto configurable: `PORT=3000 node server.js` (por defecto 8787).
+> Variables de entorno (el server las lee directamente, **no** hay carga de `.env`):
+> `PORT` (puerto, por defecto 8787) y `RPC_URL` (nodo RPC para las lecturas `/api/*`,
+> por defecto `http://127.0.0.1:8545`). Ej.: `PORT=3000 node server.js`.
 
 ## Configurar MetaMask para Anvil
 
@@ -142,6 +191,39 @@ un cliente local pueda llamarla.
 | `GET /api/pending` | La web | Lista las intenciones aún `pending`. |
 | `POST /api/purchase-result` `{requestId,status,txHash?,error?}` | La web | Marca `signing` (al reclamarla) y luego `done`/`error`. |
 
+### Login SIWE (Sign-In with Ethereum, EIP-4361)
+
+Login = **firma de un MENSAJE** (no una transacción): prueba criptográficamente la
+propiedad de la wallet, **sin gas y sin tocar la cadena**. Mismo patrón de tres actores
+que las compras (Unreal pide, la web firma, el bridge **verifica**).
+
+| Endpoint | Quién | Para qué |
+|----------|-------|----------|
+| `GET /api/siwe/nonce` | — | Genera un nonce aleatorio de un solo uso. |
+| `POST /api/siwe/login-intent` `{address}` | Unreal | Crea el mensaje EIP-4361 (domain, address, chainId 31337, nonce, issued-at) y la sesión; devuelve `{requestId, message}`. |
+| `GET /api/siwe/login-status?requestId=…` | Unreal | Polling: `pending` → `signing` → `done` (con `address`) / `error`. |
+| `GET /api/siwe/pending` | La web | Lista logins pendientes y los **reclama** (→ `signing`). |
+| `POST /api/siwe/verify` `{requestId, signature}` | La web | El bridge **verifica** la firma (ecrecover + nonce + domain + chainId). |
+
+**Qué hace la verificación:** del `message` firmado + la `signature`, `siwe`/`ethers`
+recuperan (ecrecover) la dirección que firmó y la comparan con la `address` del mensaje;
+además comprueban que el **nonce** coincide con el emitido (y no se ha usado), el
+**domain** y el **chainId**. El servidor **nunca ve la clave**: solo verifica.
+
+**Seguridad:** el **nonce es de un solo uso** (se quema al verificar) → una firma
+capturada **no se puede reenviar** (anti-repetición). Una firma de otra cuenta para un
+login que dice ser tuyo **falla** (la dirección recuperada no coincide).
+
+```
+UNREAL                       BRIDGE                         WEB + MetaMask
+  POST /siwe/login-intent ────►  crea mensaje + nonce {pending}
+  ◄── { requestId, message }
+                                              GET /siwe/pending ──► ve el login (→ signing)
+                                              signMessage(mensaje)  ← personal_sign, SIN gas
+                              verifica (ecrecover) ◄──── POST /siwe/verify { signature }
+  GET /siwe/login-status ──► done, address ✓
+```
+
 ### Flujo de una compra entre los tres actores
 
 ```
@@ -184,4 +266,37 @@ curl -X POST "http://localhost:8787/api/purchase-result" -H "Content-Type: appli
 curl "http://localhost:8787/api/purchase-status?requestId=<RID>"
 ```
 
-> `node_modules/` está ignorado por git (aunque aquí no se usa).
+### Probar el LOGIN SIWE con curl + la web
+
+La firma del login necesita la wallet, así que el camino realista es: **curl hace de
+Unreal** (intent + polling) y **la web abierta (con MetaMask) firma**.
+
+1. Abre `http://localhost:8787` y conecta MetaMask (cuenta `0xf39F…2266`, red Anvil).
+2. Como "Unreal", registra la intención de login y haz polling:
+   ```bash
+   A=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+   curl -X POST "http://localhost:8787/api/siwe/login-intent" \
+        -H "Content-Type: application/json" -d "{\"address\":\"$A\"}"   # → { requestId, message }
+   curl "http://localhost:8787/api/siwe/login-status?requestId=<RID>"   # pending → signing → done
+   ```
+3. La web detecta el login pendiente y abre MetaMask para **firmar el mensaje** (sin gas).
+   Al firmar, el bridge verifica y `login-status` pasa a `done` con la `address`.
+
+> Para una prueba **sin navegador**, se puede firmar el `message` con una wallet de
+> prueba (`ethers` `Wallet.signMessage` = `personal_sign`) y enviar la firma a
+> `POST /api/siwe/verify {requestId, signature}`. Así se validó este módulo (incluyendo
+> nonce de un solo uso y rechazo de firmante incorrecto).
+
+## Estructura del directorio (actualizada)
+
+```
+bridge/
+├── server.js                 # Web estática + API /api/* (lecturas, compras, SIWE)
+├── start-bridge.ps1          # Arranque en Windows (npm install si hace falta + server)
+├── package.json              # deps del server: siwe + ethers (para SIWE)
+├── node_modules/             # (gitignored) creado por `npm install`
+├── public/                   # web: index.html, app.js, abi/*.json
+└── test-client/              # cliente de prueba que simula a Unreal
+```
+
+> `node_modules/` está ignorado por git.
