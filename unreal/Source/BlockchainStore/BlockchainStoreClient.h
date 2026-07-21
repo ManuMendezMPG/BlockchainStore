@@ -1,19 +1,19 @@
-// Vertical slice BlockchainStore - cliente HTTP hacia el bridge.
+// Vertical slice BlockchainStore - HTTP client to the bridge.
 //
-// POR QUE UN GameInstanceSubsystem (y no un UObject suelto ni un Actor):
-// - Vive durante toda la sesion de juego y SOBREVIVE a los cambios de nivel.
-//   El estado importante (address de la wallet, BaseUrl, requestId en curso,
-//   el FTimerHandle del polling) no se pierde al cargar otro mapa.
-// - Lo instancia y lo destruye el engine; nadie tiene que hacer NewObject ni
-//   guardarlo en un UPROPERTY para que el GC no se lo lleve.
-// - Es accesible desde CUALQUIER Blueprint con un solo nodo
-//   "Get GameInstance Subsystem -> BlockchainStoreClient", sin punteros que cablear.
-// - Tiene acceso al GameInstance, y por tanto a un FTimerManager estable para el
-//   polling (mas estable que el del World, que se recrea en cada cambio de mapa).
+// WHY A GameInstanceSubsystem (and not a loose UObject or an Actor):
+// - It lives for the entire game session and SURVIVES level changes.
+//   The important state (wallet address, BaseUrl, in-flight requestId,
+//   the polling FTimerHandle) is not lost when loading another map.
+// - The engine instantiates and destroys it; nobody has to call NewObject or
+//   store it in a UPROPERTY so the GC does not collect it.
+// - It is accessible from ANY Blueprint with a single node
+//   "Get GameInstance Subsystem -> BlockchainStoreClient", with no pointers to wire up.
+// - It has access to the GameInstance, and therefore to a stable FTimerManager for
+//   polling (more stable than the World's, which is recreated on every map change).
 //
-// Un UObject suelto exigiria gestionarle el ciclo de vida a mano y un World valido
-// para los timers; un Actor obligaria a tenerlo colocado en un nivel. El subsystem
-// evita ambos problemas para una "tuberia" global como esta.
+// A loose UObject would require managing its lifecycle by hand and a valid World
+// for the timers; an Actor would require placing it in a level. The subsystem
+// avoids both problems for a global "pipeline" like this one.
 
 #pragma once
 
@@ -23,26 +23,33 @@
 #include "BlockchainStoreTypes.h"
 #include "BlockchainStoreClient.generated.h"
 
-// --- Delegates dinamicos multicast -------------------------------------------------
-// POR QUE DINAMICOS (DECLARE_DYNAMIC_MULTICAST_*):
-// - "Dynamic"  -> son asignables desde Blueprint (aparecen como nodos rojos "Bind
-//   Event" / "Assign" y como pin de evento). Un delegate normal (no-dynamic) NO se
-//   puede enganchar desde Blueprint.
-// - "Multicast" -> varios widgets/objetos pueden suscribirse al mismo evento.
-// - Marcados con UPROPERTY(BlueprintAssignable) en la clase para que la UI los vea.
-// Asi la logica de red (este C++) no conoce a la UI: solo emite eventos y quien
-// quiera reacciona. Desacople total entre tuberia y presentacion.
+// --- Dynamic multicast delegates ---------------------------------------------------
+// WHY DYNAMIC (DECLARE_DYNAMIC_MULTICAST_*):
+// - "Dynamic"  -> they are assignable from Blueprint (they appear as red "Bind
+//   Event" / "Assign" nodes and as an event pin). A normal (non-dynamic) delegate
+//   CANNOT be hooked up from Blueprint.
+// - "Multicast" -> several widgets/objects can subscribe to the same event.
+// - Marked with UPROPERTY(BlueprintAssignable) in the class so the UI sees them.
+// This way the network logic (this C++) does not know about the UI: it only emits
+// events and whoever wants reacts. Full decoupling between pipeline and presentation.
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCatalogUpdated, const TArray<FStoreCatalogItem>&, Items);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInventoryUpdated, const TArray<FStoreInventoryEntry>&, Items);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnProgressUpdated, const TArray<FStoreMedal>&, Medals);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPurchaseStateChanged, const FString&, RequestId, const FString&, Status);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPurchaseCompleted, const FString&, TxHash);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPurchaseFailed, const FString&, Reason);
 
+// SIWE login: same pattern as purchases (intent + status polling). The signature
+// (personal_sign) happens in the web+MetaMask; Unreal only launches the intent and polls.
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLoginStateChanged, const FString&, Status);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLoginCompleted, const FString&, Address);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLoginFailed, const FString&, Reason);
+
 /**
- * Cliente del BlockchainStore bridge. Toda la comunicacion HTTP con
- * http://localhost:8787 pasa por aqui. La firma real ocurre en el navegador
- * (MetaMask); Unreal solo dispara intents y hace polling del estado.
+ * BlockchainStore bridge client. All HTTP communication with
+ * http://localhost:8787 goes through here. The actual signature happens in the browser
+ * (MetaMask); Unreal only fires intents and polls the status.
  */
 UCLASS(BlueprintType)
 class BLOCKCHAINSTORE_API UBlockchainStoreClient : public UGameInstanceSubsystem
@@ -50,15 +57,23 @@ class BLOCKCHAINSTORE_API UBlockchainStoreClient : public UGameInstanceSubsystem
 	GENERATED_BODY()
 
 public:
-	// ---- Configuracion -----------------------------------------------------------
+	// ---- Configuration -----------------------------------------------------------
 
-	/** URL base del bridge. Editable; por defecto el bridge local. */
+	/** Base URL of the bridge. Editable; defaults to the local bridge. */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "BlockchainStore|Config")
 	FString BaseUrl = TEXT("http://localhost:8787");
 
-	/** Address de la wallet del jugador. De momento set manual; el login SIWE vendra despues. */
+	/**
+	 * Address of the active wallet used by FetchInventory/BuyItem. It can be set
+	 * manually with SetWalletAddress, but after a successful SIWE login it becomes UNIFIED
+	 * with AuthenticatedAddress: subsequent operations use the authenticated wallet.
+	 */
 	UPROPERTY(BlueprintReadOnly, Category = "BlockchainStore|Config")
 	FString WalletAddress;
+
+	/** Address verified by SIWE (empty if nobody has logged in). Source of truth for the login. */
+	UPROPERTY(BlueprintReadOnly, Category = "BlockchainStore|Auth")
+	FString AuthenticatedAddress;
 
 	UFUNCTION(BlueprintCallable, Category = "BlockchainStore|Config")
 	void SetWalletAddress(const FString& InAddress);
@@ -66,36 +81,75 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "BlockchainStore|Config")
 	void SetBaseUrl(const FString& InUrl);
 
-	/** True si hay una compra en curso (intent enviado, polling activo). */
+	/** True if there is a purchase in progress (intent sent, polling active). */
 	UFUNCTION(BlueprintPure, Category = "BlockchainStore")
 	bool IsPurchaseInProgress() const { return bPurchaseInProgress; }
 
-	// ---- Acciones expuestas a Blueprint ------------------------------------------
+	/** True if there is a SIWE login in progress (intent sent, polling active). */
+	UFUNCTION(BlueprintPure, Category = "BlockchainStore|Auth")
+	bool IsLoginInProgress() const { return bLoginInProgress; }
 
-	/** GET /api/catalog. Al completarse dispara OnCatalogUpdated. */
+	/** True when a SIWE login completed successfully. */
+	UFUNCTION(BlueprintPure, Category = "BlockchainStore|Auth")
+	bool IsAuthenticated() const { return bIsAuthenticated; }
+
+	/** Address authenticated by SIWE (empty if nobody has logged in). */
+	UFUNCTION(BlueprintPure, Category = "BlockchainStore|Auth")
+	FString GetAuthenticatedAddress() const { return AuthenticatedAddress; }
+
+	// ---- Actions exposed to Blueprint --------------------------------------------
+
+	/** GET /api/catalog. On completion fires OnCatalogUpdated. */
 	UFUNCTION(BlueprintCallable, Category = "BlockchainStore")
 	void FetchCatalog();
 
-	/** GET /api/inventory?address=<WalletAddress>. Al completarse dispara OnInventoryUpdated. */
+	/** GET /api/inventory?address=<WalletAddress>. On completion fires OnInventoryUpdated. */
 	UFUNCTION(BlueprintCallable, Category = "BlockchainStore")
 	void FetchInventory();
 
+	/** GET /api/progress?address=<WalletAddress>. On completion fires OnProgressUpdated
+	 *  with the 3 medals (earned/locked) and the Merchant rarity if applicable. */
+	UFUNCTION(BlueprintCallable, Category = "BlockchainStore")
+	void FetchProgress();
+
 	/**
-	 * POST /api/purchase-intent y arranca el polling de estado.
-	 * Emite OnPurchaseStateChanged en cada cambio, OnPurchaseCompleted(txHash) al
-	 * terminar bien, OnPurchaseFailed(motivo) si error o timeout. Refresca inventario
-	 * automaticamente al completar.
+	 * POST /api/purchase-intent and starts the status polling.
+	 * Emits OnPurchaseStateChanged on every change, OnPurchaseCompleted(txHash) on
+	 * successful completion, OnPurchaseFailed(reason) on error or timeout. Refreshes the
+	 * inventory automatically on completion.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "BlockchainStore")
 	void BuyItem(int32 ItemId, int32 Quantity = 1);
 
-	// ---- Eventos para la UI (BlueprintAssignable) --------------------------------
+	/**
+	 * SIWE login. POST /api/siwe/login-intent with the address and starts polling
+	 * /api/siwe/login-status. The signature happens in the web+MetaMask; Unreal does not touch keys.
+	 * Emits OnLoginStateChanged(status) on pending/signing, OnLoginCompleted(address) on
+	 * verification (setting AuthenticatedAddress and WalletAddress), and OnLoginFailed(reason)
+	 * on error or timeout.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "BlockchainStore|Auth")
+	void Login(const FString& Address);
+
+	/**
+	 * Closes the SIWE session: sets IsAuthenticated to false, clears
+	 * AuthenticatedAddress/WalletAddress and cancels any in-flight login or purchase
+	 * polling/timer. It does NOT call the bridge (SIWE is stateless: each login is a new
+	 * signature). After this, the client is ready for a new Login.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "BlockchainStore|Auth")
+	void Logout();
+
+	// ---- Events for the UI (BlueprintAssignable) ---------------------------------
 
 	UPROPERTY(BlueprintAssignable, Category = "BlockchainStore|Events")
 	FOnCatalogUpdated OnCatalogUpdated;
 
 	UPROPERTY(BlueprintAssignable, Category = "BlockchainStore|Events")
 	FOnInventoryUpdated OnInventoryUpdated;
+
+	UPROPERTY(BlueprintAssignable, Category = "BlockchainStore|Events")
+	FOnProgressUpdated OnProgressUpdated;
 
 	UPROPERTY(BlueprintAssignable, Category = "BlockchainStore|Events")
 	FOnPurchaseStateChanged OnPurchaseStateChanged;
@@ -106,38 +160,62 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "BlockchainStore|Events")
 	FOnPurchaseFailed OnPurchaseFailed;
 
+	UPROPERTY(BlueprintAssignable, Category = "BlockchainStore|Events")
+	FOnLoginStateChanged OnLoginStateChanged;
+
+	UPROPERTY(BlueprintAssignable, Category = "BlockchainStore|Events")
+	FOnLoginCompleted OnLoginCompleted;
+
+	UPROPERTY(BlueprintAssignable, Category = "BlockchainStore|Events")
+	FOnLoginFailed OnLoginFailed;
+
 	// ---- USubsystem --------------------------------------------------------------
 	virtual void Deinitialize() override;
 
 private:
-	// ---- Helpers HTTP ------------------------------------------------------------
+	// ---- HTTP helpers ------------------------------------------------------------
 
-	/** Crea un request con metodo y URL ya puestos (y Content-Type json si hay body). */
+	/** Creates a request with method and URL already set (and Content-Type json if there is a body). */
 	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> MakeRequest(const FString& Verb, const FString& Url) const;
 
-	/** Devuelve true y rellena OutRoot si Response es 2xx y el body es JSON valido.
-	 *  Si el body trae {"error": "..."} o el codigo no es 2xx, devuelve false y
-	 *  rellena OutError con un motivo legible. */
+	/** Returns true and fills OutRoot if Response is 2xx and the body is valid JSON.
+	 *  If the body carries {"error": "..."} or the code is not 2xx, returns false and
+	 *  fills OutError with a readable reason. */
 	static bool TryParseJsonObject(FHttpResponsePtr Response, bool bSucceeded, TSharedPtr<class FJsonObject>& OutRoot, FString& OutError);
 
-	// ---- Callbacks de respuesta --------------------------------------------------
+	// ---- Response callbacks ------------------------------------------------------
 	void HandleCatalogResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
 	void HandleInventoryResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
+	void HandleProgressResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
 	void HandlePurchaseIntentResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
 	void HandlePurchaseStatusResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
+	void HandleLoginIntentResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
+	void HandleLoginStatusResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
 
 	// ---- Polling -----------------------------------------------------------------
 	void PollPurchaseStatus();
 	void StopPolling();
+	void PollLoginStatus();
+	void StopLoginPolling();
 
-	// Estado de la compra en curso.
+	// State of the in-flight purchase.
 	FString CurrentRequestId;
 	FString LastReportedStatus;
 	FTimerHandle PollTimerHandle;
 	int32 PollAttempts = 0;
 	bool bPurchaseInProgress = false;
 
-	// Polling cada 1.5s, hasta 40 intentos => ~60s de timeout antes de rendirse.
+	// State of the in-flight SIWE login (parallel to purchases, same polling pattern).
+	FString LoginRequestId;
+	FString LastLoginStatus;
+	FString PendingLoginAddress; // address sent in the intent; fallback if the status does not carry it.
+	FTimerHandle LoginPollTimerHandle;
+	int32 LoginPollAttempts = 0;
+	bool bLoginInProgress = false;
+	bool bIsAuthenticated = false;
+
+	// Polling every 1.5s, up to 40 attempts => ~60s timeout before giving up.
+	// Shared by purchases and login (the user has to sign in MetaMask).
 	static constexpr float PollIntervalSeconds = 1.5f;
 	static constexpr int32 MaxPollAttempts = 40;
 };
