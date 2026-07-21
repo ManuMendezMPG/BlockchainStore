@@ -1,34 +1,35 @@
 /* =============================================================================
- * Servidor del puente: sirve la web ESTÁTICA y expone una API HTTP/JSON.
+ * Bridge server: serves the STATIC web app and exposes an HTTP/JSON API.
  *
- * Dos públicos:
- *   - Navegador (web + MetaMask): uso manual y, además, FIRMA las compras.
- *   - Cliente externo (juego de Unreal): usa la API /api/* para leer la cadena
- *     y para registrar/consultar intenciones de compra.
+ * Two audiences:
+ *   - Browser (web + MetaMask): manual use and, additionally, SIGNS purchases.
+ *   - External client (Unreal game): uses the /api/* API to read the chain and
+ *     to register/query purchase intents.
  *
- * Patrón de compra (Unreal no puede firmar con MetaMask):
- *   1. Unreal     → POST /api/purchase-intent        (queda "pending")
- *   2. La web     → GET  /api/pending                (descubre la intención)
- *                 → POST /api/purchase-result signing (la reclama)
- *                 → dispara MetaMask, el jugador FIRMA
- *                 → POST /api/purchase-result done|error (con txHash)
- *   3. Unreal     → GET  /api/purchase-status?requestId=...  (polling hasta "done")
+ * Purchase pattern (Unreal cannot sign with MetaMask):
+ *   1. Unreal     → POST /api/purchase-intent        (stays "pending")
+ *   2. The web    → GET  /api/pending                (discovers the intent)
+ *                 → POST /api/purchase-result signing (claims it)
+ *                 → triggers MetaMask, the player SIGNS
+ *                 → POST /api/purchase-result done|error (with txHash)
+ *   3. Unreal     → GET  /api/purchase-status?requestId=...  (polling until "done")
  *
- * Sin dependencias externas: solo módulos nativos de Node (http, fs, path, crypto,
- * url). Las LECTURAS se hacen con eth_call por JSON-RPC crudo contra Anvil; como
- * todos los argumentos son address/uint256, codificar/decodificar a mano es trivial.
+ * No external dependencies: only Node's native modules (http, fs, path, crypto,
+ * url). READS are done with raw JSON-RPC eth_call against Anvil; since all the
+ * arguments are address/uint256, encoding/decoding by hand is trivial.
  *
- * ⚠️ El servidor NUNCA maneja claves privadas. La firma ocurre SOLO en MetaMask,
- *    en el navegador. El servidor solo COORDINA (lecturas + buzón de intenciones).
- * ⚠️ Las intenciones se guardan EN MEMORIA (un Map): se pierden al reiniciar.
+ * ⚠️ The server NEVER handles private keys. Signing happens ONLY in MetaMask,
+ *    in the browser. The server only COORDINATES (reads + intent mailbox).
+ * ⚠️ Intents are stored IN MEMORY (a Map): they are lost on restart.
  * ===========================================================================*/
 
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-// Dependencias para SIWE: la verificación criptográfica de firmas DEBE usar
-// librerías probadas, no código casero. (Ver README: rompe el "cero dependencias".)
+// Dependencies for SIWE: the cryptographic verification of signatures MUST use
+// battle-tested libraries, not homemade code. (See README: it breaks the "zero
+// dependencies" goal.)
 const { SiweMessage, generateNonce } = require("siwe");
 const ethers = require("ethers");
 
@@ -36,38 +37,38 @@ const PORT = process.env.PORT || 8787;
 const PUBLIC_DIR = path.join(__dirname, "public");
 const RPC_URL = process.env.RPC_URL || "http://127.0.0.1:8545";
 
-// Direcciones deterministas (las mismas que usa public/app.js).
+// Deterministic addresses (the same ones used by public/app.js).
 const GAMESTORE_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
 const ACHIEVEMENTS_ADDRESS = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512";
 
-// Config SIWE (EIP-4361). El `domain` debe coincidir al construir y al verificar.
+// SIWE config (EIP-4361). The `domain` must match when building and verifying.
 const SIWE_DOMAIN = "localhost:8787";
 const SIWE_URI = "http://localhost:8787";
 const CHAIN_ID = 31337; // Anvil
 
-// Catálogo (ids y nombres reales del contrato).
+// Catalog (real ids and names from the contract).
 const ITEMS = [
-  { id: 0, name: "Espada" },
-  { id: 1, name: "Escudo" },
-  { id: 2, name: "Arco" },
-  { id: 3, name: "Carcaj 5" },
-  { id: 4, name: "Carcaj 10" },
-  { id: 5, name: "Carcaj 20" },
-  { id: 6, name: "Flecha" },
-  { id: 7, name: "Botella vacia" },
-  { id: 8, name: "Pocion de vida" },
-  { id: 9, name: "Pocion de mana" },
+  { id: 0, name: "Sword" },
+  { id: 1, name: "Shield" },
+  { id: 2, name: "Bow" },
+  { id: 3, name: "Quiver 5" },
+  { id: 4, name: "Quiver 10" },
+  { id: 5, name: "Quiver 20" },
+  { id: 6, name: "Arrow" },
+  { id: 7, name: "Empty bottle" },
+  { id: 8, name: "Health potion" },
+  { id: 9, name: "Mana potion" },
 ];
 const FLECHA_ID = 6;
 const MEDALS = [
-  { id: 0, name: "ARQUERO" },
-  { id: 1, name: "MERCADER" },
-  { id: 2, name: "COLECCIONISTA" },
+  { id: 0, name: "Archer" },
+  { id: 1, name: "Merchant" },
+  { id: 2, name: "Collector" },
 ];
-const RARITY = ["None", "Bronce", "Plata", "Oro"];
+const RARITY = ["None", "Bronze", "Silver", "Gold"];
 
-// Selectores de función (keccak256(sig)[:4]). Hardcodeados porque Node no puede
-// calcular keccak256 nativamente; obtenidos con `cast sig "<firma>"`.
+// Function selectors (keccak256(sig)[:4]). Hardcoded because Node cannot compute
+// keccak256 natively; obtained with `cast sig "<signature>"`.
 const SEL = {
   balanceOf: "0x00fdd58e", //      balanceOf(address,uint256)
   priceOf: "0xb9186d7d", //        priceOf(uint256)
@@ -77,16 +78,16 @@ const SEL = {
   mercaderRarity: "0x05d9870f", // mercaderRarity(address)
 };
 
-// Buzón de intenciones de compra (EN MEMORIA → se pierde al reiniciar).
+// Purchase intent mailbox (IN MEMORY → lost on restart).
 const intents = new Map();
 
-// Sesiones de login SIWE y nonces emitidos (también EN MEMORIA).
+// SIWE login sessions and issued nonces (also IN MEMORY).
 const loginSessions = new Map(); // requestId → { address, nonce, message, status, ... }
 const issuedNonces = new Map(); //  nonce → { used: boolean }  (single-use)
 
-// ─────────────────────────── JSON-RPC / lectura ──────────────────────────────
+// ─────────────────────────── JSON-RPC / read ─────────────────────────────────
 
-// Llamada JSON-RPC cruda al nodo (Anvil). Devuelve `result` o rechaza con el error.
+// Raw JSON-RPC call to the node (Anvil). Returns `result` or rejects with the error.
 function rpcCall(method, params) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
@@ -119,18 +120,18 @@ function rpcCall(method, params) {
   });
 }
 
-// Codificación ABI mínima (todo es address/uint256 → 32 bytes left-padded).
+// Minimal ABI encoding (everything is address/uint256 → 32 bytes left-padded).
 const padArg = (hex) => hex.replace(/^0x/, "").padStart(64, "0");
 const encAddress = (a) => padArg(a.toLowerCase());
 const encUint = (n) => padArg(BigInt(n).toString(16));
 
-// eth_call a una función `view` que devuelve un único uint256.
+// eth_call to a `view` function that returns a single uint256.
 async function readUint(to, selector, encodedArgs = "") {
   const result = await rpcCall("eth_call", [{ to, data: selector + encodedArgs }, "latest"]);
   return BigInt(!result || result === "0x" ? "0x0" : result);
 }
 
-// wei (BigInt) → string en ETH, sin librerías.
+// wei (BigInt) → string in ETH, without libraries.
 function weiToEth(wei) {
   const s = wei.toString().padStart(19, "0");
   const intPart = s.slice(0, -18);
@@ -140,7 +141,7 @@ function weiToEth(wei) {
 
 const isAddress = (a) => typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a);
 
-// ─────────────────────────── Lecturas de dominio ─────────────────────────────
+// ─────────────────────────── Domain reads ────────────────────────────────────
 
 async function getCatalog() {
   const items = [];
@@ -184,7 +185,7 @@ async function getProgress(address) {
   };
 }
 
-// ─────────────────────────── Helpers HTTP/JSON ───────────────────────────────
+// ─────────────────────────── HTTP/JSON helpers ───────────────────────────────
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -202,7 +203,7 @@ function readJsonBody(req) {
     let body = "";
     req.on("data", (d) => {
       body += d;
-      if (body.length > 1e6) req.destroy(); // guard anti-abuso
+      if (body.length > 1e6) req.destroy(); // anti-abuse guard
     });
     req.on("end", () => {
       try {
@@ -220,32 +221,32 @@ function readJsonBody(req) {
 async function handleApi(req, res, u) {
   const route = `${req.method} ${u.pathname}`;
 
-  // ── Lecturas ──────────────────────────────────────────────────────────────
+  // ── Reads ───────────────────────────────────────────────────────────────────
   if (route === "GET /api/catalog") {
     return sendJson(res, 200, { items: await getCatalog() });
   }
 
   if (route === "GET /api/inventory") {
     const address = u.searchParams.get("address");
-    if (!isAddress(address)) return sendJson(res, 400, { error: "address invalida o ausente" });
+    if (!isAddress(address)) return sendJson(res, 400, { error: "invalid or missing address" });
     return sendJson(res, 200, await getInventory(address));
   }
 
   if (route === "GET /api/progress") {
     const address = u.searchParams.get("address");
-    if (!isAddress(address)) return sendJson(res, 400, { error: "address invalida o ausente" });
+    if (!isAddress(address)) return sendJson(res, 400, { error: "invalid or missing address" });
     return sendJson(res, 200, await getProgress(address));
   }
 
-  // ── Compra: Unreal registra una intención ──────────────────────────────────
+  // ── Purchase: Unreal registers an intent ────────────────────────────────────
   if (route === "POST /api/purchase-intent") {
     const body = await readJsonBody(req);
     const { address, itemId, quantity } = body;
-    if (!isAddress(address)) return sendJson(res, 400, { error: "address invalida" });
+    if (!isAddress(address)) return sendJson(res, 400, { error: "invalid address" });
     const id = Number(itemId);
     const qty = Number(quantity);
-    if (!Number.isInteger(id) || id < 0 || id > 9) return sendJson(res, 400, { error: "itemId fuera de rango (0-9)" });
-    if (!Number.isInteger(qty) || qty < 1) return sendJson(res, 400, { error: "quantity debe ser >= 1" });
+    if (!Number.isInteger(id) || id < 0 || id > 9) return sendJson(res, 400, { error: "itemId out of range (0-9)" });
+    if (!Number.isInteger(qty) || qty < 1) return sendJson(res, 400, { error: "quantity must be >= 1" });
 
     const requestId = crypto.randomUUID();
     intents.set(requestId, {
@@ -261,11 +262,11 @@ async function handleApi(req, res, u) {
     return sendJson(res, 201, { requestId, status: "pending" });
   }
 
-  // ── Compra: Unreal consulta el estado (polling) ─────────────────────────────
+  // ── Purchase: Unreal queries the status (polling) ───────────────────────────
   if (route === "GET /api/purchase-status") {
     const requestId = u.searchParams.get("requestId");
     const intent = intents.get(requestId);
-    if (!intent) return sendJson(res, 404, { error: "requestId desconocido" });
+    if (!intent) return sendJson(res, 404, { error: "unknown requestId" });
     return sendJson(res, 200, {
       status: intent.status,
       txHash: intent.txHash,
@@ -275,7 +276,7 @@ async function handleApi(req, res, u) {
     });
   }
 
-  // ── Compra: la WEB descubre intenciones pendientes ──────────────────────────
+  // ── Purchase: the WEB discovers pending intents ─────────────────────────────
   if (route === "GET /api/pending") {
     const pending = [...intents.values()]
       .filter((i) => i.status === "pending")
@@ -283,14 +284,14 @@ async function handleApi(req, res, u) {
     return sendJson(res, 200, { pending });
   }
 
-  // ── Compra: la WEB reporta el avance (signing → done|error) ─────────────────
+  // ── Purchase: the WEB reports progress (signing → done|error) ───────────────
   if (route === "POST /api/purchase-result") {
     const body = await readJsonBody(req);
     const { requestId, status, txHash, error } = body;
     const intent = intents.get(requestId);
-    if (!intent) return sendJson(res, 404, { error: "requestId desconocido" });
+    if (!intent) return sendJson(res, 404, { error: "unknown requestId" });
     if (!["signing", "done", "error"].includes(status)) {
-      return sendJson(res, 400, { error: "status debe ser signing|done|error" });
+      return sendJson(res, 400, { error: "status must be signing|done|error" });
     }
     intent.status = status;
     if (txHash) intent.txHash = txHash;
@@ -298,31 +299,31 @@ async function handleApi(req, res, u) {
     return sendJson(res, 200, { ok: true, status: intent.status });
   }
 
-  // ── SIWE: nonce suelto (para clientes que construyan su propio mensaje) ─────
+  // ── SIWE: standalone nonce (for clients that build their own message) ───────
   if (route === "GET /api/siwe/nonce") {
     const nonce = generateNonce();
     issuedNonces.set(nonce, { used: false });
     return sendJson(res, 200, { nonce });
   }
 
-  // ── SIWE: Unreal registra una intención de login ───────────────────────────
+  // ── SIWE: Unreal registers a login intent ───────────────────────────────────
   if (route === "POST /api/siwe/login-intent") {
     const body = await readJsonBody(req);
     let address;
     try {
-      address = ethers.getAddress(body.address); // valida + checksum EIP-55 (o lanza)
+      address = ethers.getAddress(body.address); // validates + EIP-55 checksum (or throws)
     } catch {
-      return sendJson(res, 400, { error: "address inválida" });
+      return sendJson(res, 400, { error: "invalid address" });
     }
 
     const nonce = generateNonce();
     issuedNonces.set(nonce, { used: false });
 
-    // Construimos el mensaje EIP-4361 en el servidor (la web firmará ESTE mensaje).
+    // We build the EIP-4361 message on the server (the web will sign THIS message).
     const siwe = new SiweMessage({
       domain: SIWE_DOMAIN,
       address,
-      statement: "Inicia sesion en GameStore (demo). Firmar no cuesta gas.",
+      statement: "Sign in to GameStore (demo). Signing is free (no gas).",
       uri: SIWE_URI,
       version: "1",
       chainId: CHAIN_ID,
@@ -344,10 +345,10 @@ async function handleApi(req, res, u) {
     return sendJson(res, 201, { requestId, message });
   }
 
-  // ── SIWE: Unreal consulta el estado (polling) ───────────────────────────────
+  // ── SIWE: Unreal queries the status (polling) ───────────────────────────────
   if (route === "GET /api/siwe/login-status") {
     const s = loginSessions.get(u.searchParams.get("requestId"));
-    if (!s) return sendJson(res, 404, { error: "requestId desconocido" });
+    if (!s) return sendJson(res, 404, { error: "unknown requestId" });
     return sendJson(res, 200, {
       status: s.status,
       address: s.status === "done" ? s.address : undefined,
@@ -355,9 +356,9 @@ async function handleApi(req, res, u) {
     });
   }
 
-  // ── SIWE: la WEB descubre logins pendientes (claim-on-read → signing) ───────
-  // Al devolverlos los marcamos "signing": así dejan de ofrecerse y dos pestañas
-  // no firman el mismo login (igual idea que "signing" en las compras).
+  // ── SIWE: the WEB discovers pending logins (claim-on-read → signing) ────────
+  // When returning them we mark them "signing": that way they stop being offered
+  // and two tabs won't sign the same login (same idea as "signing" in purchases).
   if (route === "GET /api/siwe/pending") {
     const pending = [];
     for (const s of loginSessions.values()) {
@@ -369,56 +370,56 @@ async function handleApi(req, res, u) {
     return sendJson(res, 200, { pending });
   }
 
-  // ── SIWE: la WEB reporta la firma → el bridge VERIFICA criptográficamente ───
+  // ── SIWE: the WEB reports the signature → the bridge VERIFIES cryptographically ─
   if (route === "POST /api/siwe/verify") {
     const body = await readJsonBody(req);
     const { requestId, signature, error: clientError } = body;
     const s = loginSessions.get(requestId);
-    if (!s) return sendJson(res, 404, { error: "requestId desconocido" });
+    if (!s) return sendJson(res, 404, { error: "unknown requestId" });
 
-    // La web puede reportar un fallo (p. ej. el usuario rechazó la firma).
+    // The web may report a failure (e.g. the user rejected the signature).
     if (clientError) {
       s.status = "error";
       s.error = String(clientError);
       return sendJson(res, 200, { ok: false, status: "error" });
     }
-    if (typeof signature !== "string") return sendJson(res, 400, { error: "falta signature" });
+    if (typeof signature !== "string") return sendJson(res, 400, { error: "missing signature" });
 
-    // Nonce de un solo uso: si no existe o ya se usó, rechazamos (anti-repetición).
+    // Single-use nonce: if it doesn't exist or was already used, reject (anti-replay).
     const nrec = issuedNonces.get(s.nonce);
     if (!nrec || nrec.used) {
       s.status = "error";
-      s.error = "nonce inválido o ya usado";
+      s.error = "invalid or already-used nonce";
       return sendJson(res, 400, { error: s.error });
     }
 
     try {
-      // Re-parseamos el mensaje EXACTO que emitimos y verificamos la firma.
-      // siwe.verify hace ecrecover (con ethers): del mensaje + firma recupera la
-      // dirección firmante y la compara con la `address` del mensaje; además
-      // comprueba que el nonce y el domain coinciden con los esperados.
+      // We re-parse the EXACT message we issued and verify the signature.
+      // siwe.verify does ecrecover (with ethers): from the message + signature it
+      // recovers the signing address and compares it with the message's `address`;
+      // it also checks that the nonce and domain match the expected ones.
       const siwe = new SiweMessage(s.message);
       const result = await siwe.verify({ signature, nonce: s.nonce, domain: SIWE_DOMAIN });
-      if (!result.success) throw new Error("firma no válida");
-      if (siwe.chainId !== CHAIN_ID) throw new Error("chainId incorrecto");
+      if (!result.success) throw new Error("invalid signature");
+      if (siwe.chainId !== CHAIN_ID) throw new Error("wrong chainId");
 
-      nrec.used = true; // NONCE QUEMADO: no se puede reutilizar
+      nrec.used = true; // NONCE BURNED: cannot be reused
       s.status = "done";
       s.address = siwe.address;
       return sendJson(res, 200, { ok: true, address: siwe.address });
     } catch (e) {
-      // siwe.verify rechaza con un objeto {success:false, error:{type}} en vez de Error.
-      const reason = e?.error?.type || e?.message || "verificación fallida";
+      // siwe.verify rejects with an object {success:false, error:{type}} instead of Error.
+      const reason = e?.error?.type || e?.message || "verification failed";
       s.status = "error";
       s.error = reason;
       return sendJson(res, 401, { error: reason });
     }
   }
 
-  return sendJson(res, 404, { error: `ruta no encontrada: ${route}` });
+  return sendJson(res, 404, { error: `route not found: ${route}` });
 }
 
-// ────────────────────────── Web estática (GET) ───────────────────────────────
+// ────────────────────────── Static web (GET) ─────────────────────────────────
 
 function serveStatic(req, res, u) {
   const urlPath = decodeURIComponent(u.pathname);
@@ -455,24 +456,24 @@ function serveStatic(req, res, u) {
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, "http://localhost");
 
-  // Preflight CORS para que un cliente externo (Unreal) pueda llamar a la API.
+  // CORS preflight so an external client (Unreal) can call the API.
   if (req.method === "OPTIONS") {
     res.writeHead(204, CORS);
     res.end();
     return;
   }
 
-  // La API (/api/*) está separada de servir la web estática.
+  // The API (/api/*) is separate from serving the static web.
   if (u.pathname.startsWith("/api/")) {
     try {
       await handleApi(req, res, u);
     } catch (e) {
-      sendJson(res, 502, { error: e.message || "error interno" });
+      sendJson(res, 502, { error: e.message || "internal error" });
     }
     return;
   }
 
-  // Web estática: solo GET.
+  // Static web: GET only.
   if (req.method !== "GET") {
     res.writeHead(405).end("Method Not Allowed");
     return;
@@ -481,8 +482,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`\n  Puente web sirviendo en:  http://localhost:${PORT}`);
-  console.log(`  API JSON en:              http://localhost:${PORT}/api/*`);
-  console.log(`  RPC de lectura:           ${RPC_URL}`);
-  console.log(`  (Ctrl+C para detener)\n`);
+  console.log(`\n  Web bridge serving at:    http://localhost:${PORT}`);
+  console.log(`  JSON API at:              http://localhost:${PORT}/api/*`);
+  console.log(`  Read RPC:                 ${RPC_URL}`);
+  console.log(`  (Ctrl+C to stop)\n`);
 });

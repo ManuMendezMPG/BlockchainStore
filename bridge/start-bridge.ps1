@@ -1,23 +1,23 @@
 # =============================================================================
-# start-bridge.ps1 - Arranca el servidor del bridge en WINDOWS.
+# start-bridge.ps1 - Starts the bridge server on WINDOWS.
 #
-# Instala dependencias (npm install) SOLO cuando hace falta:
-#   - primer arranque (no existe node_modules), o
-#   - package.json cambio desde la ultima instalacion.
-# En los demas arranques, va directo a 'node server.js'.
+# Installs dependencies (npm install) ONLY when needed:
+#   - first start (node_modules does not exist), or
+#   - package.json changed since the last install.
+# On all other starts, it goes straight to 'node server.js'.
 #
-# Uso (PowerShell, desde cualquier carpeta):
+# Usage (PowerShell, from any folder):
 #   powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu\home\manumendez\projects\bridge\start-bridge.ps1
-# o, situado en la carpeta bridge:
+# or, while in the bridge folder:
 #   .\start-bridge.ps1
 #
-# Nota: este script es ASCII puro a proposito (Windows PowerShell 5.1 lee los .ps1
-# sin BOM como ANSI; usar simbolos no-ASCII rompe el parser).
+# Note: this script is pure ASCII on purpose (Windows PowerShell 5.1 reads .ps1
+# files without a BOM as ANSI; using non-ASCII symbols breaks the parser).
 # =============================================================================
 
 $ErrorActionPreference = "Stop"
 
-# La carpeta del bridge es la de ESTE script (funciona desde cualquier cwd).
+# The bridge folder is the one of THIS script (works from any cwd).
 $BridgeDir = $PSScriptRoot
 $pkg     = Join-Path $BridgeDir "package.json"
 $lock    = Join-Path $BridgeDir "package-lock.json"
@@ -28,45 +28,45 @@ function Ok($m)   { Write-Host "[OK] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "[!] $m" -ForegroundColor Yellow }
 function Fail($m) { Write-Host "[X] $m" -ForegroundColor Red; exit 1 }
 
-# -- 0) Esta Node? ------------------------------------------------------------
+# -- 0) Is Node installed? ----------------------------------------------------
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  Fail "No se encuentra 'node' en Windows. Instala Node.js (https://nodejs.org)."
+  Fail "'node' not found on Windows. Install Node.js (https://nodejs.org)."
 }
 if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-  Fail "No se encuentra 'npm' en Windows. Viene con Node.js."
+  Fail "'npm' not found on Windows. It comes with Node.js."
 }
-Info ("Node " + (node --version) + "  -  carpeta: $BridgeDir")
+Info ("Node " + (node --version) + "  -  folder: $BridgeDir")
 
-# Trabajar SIEMPRE desde la carpeta del bridge (npm install y node server.js
-# deben ejecutarse aqui, no en el cwd desde el que se lanzo el script).
+# Always work from the bridge folder (npm install and node server.js must run
+# here, not in the cwd from which the script was launched).
 Set-Location $BridgeDir
 
-# -- 1+2) Hace falta instalar dependencias? -----------------------------------
+# -- 1+2) Do we need to install dependencies? ---------------------------------
 $needInstall = $false
 $reason = ""
 if (-not (Test-Path $modules)) {
-  $needInstall = $true; $reason = "no existe node_modules (primer arranque)"
+  $needInstall = $true; $reason = "node_modules does not exist (first start)"
 }
 elseif (Test-Path $lock) {
-  # package.json mas reciente que el lock => las dependencias cambiaron tras instalar.
+  # package.json newer than the lock => dependencies changed after installing.
   if ((Get-Item $pkg).LastWriteTime -gt (Get-Item $lock).LastWriteTime) {
-    $needInstall = $true; $reason = "package.json cambio desde el ultimo install"
+    $needInstall = $true; $reason = "package.json changed since the last install"
   }
 }
 elseif ((Get-Item $pkg).LastWriteTime -gt (Get-Item $modules).LastWriteTime) {
-  # Sin lock: comparamos contra node_modules como aproximacion.
-  $needInstall = $true; $reason = "package.json cambio desde el ultimo install"
+  # No lock: we compare against node_modules as an approximation.
+  $needInstall = $true; $reason = "package.json changed since the last install"
 }
 
 if ($needInstall) {
-  Warn "Instalando dependencias ($reason)..."
+  Warn "Installing dependencies ($reason)..."
   & npm install
-  if ($LASTEXITCODE -ne 0) { Fail "'npm install' fallo (codigo $LASTEXITCODE)." }
-  Ok "Dependencias instaladas."
+  if ($LASTEXITCODE -ne 0) { Fail "'npm install' failed (code $LASTEXITCODE)." }
+  Ok "Dependencies installed."
 } else {
-  Ok "Dependencias ya presentes y al dia (no se reinstala)."
+  Ok "Dependencies already present and up to date (no reinstall)."
 }
 
-# -- 3) Arrancar el servidor --------------------------------------------------
-Info "Arrancando el servidor del bridge (Ctrl+C para parar)..."
+# -- 3) Start the server ------------------------------------------------------
+Info "Starting the bridge server (Ctrl+C to stop)..."
 & node server.js

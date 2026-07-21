@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GameStore — Banco de pruebas del contrato</title>
+    <title>GameStore — Contract test bench</title>
 
-    <!-- ethers.js v6 (UMD desde CDN): expone la global `ethers`. Stack mínimo. -->
+    <!-- ethers.js v6 (UMD from CDN): exposes the global `ethers`. Minimal stack. -->
     <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
 
     <style>
@@ -57,36 +57,36 @@
   </head>
 
   <body>
-    <h1>🎮 GameStore — banco de pruebas</h1>
+    <h1>🎮 GameStore — test bench</h1>
     <p class="muted">
-      Web local para <strong>validar el contrato</strong> (no es la cara final del
-      proyecto; eso será Unreal). Solo gestiona lo <strong>on-chain</strong>:
-      propiedad, economía, dependencias y progreso. El <em>uso</em> de los items
-      (gastar flechas, beber pociones, slots) es de Unreal y NO está aquí.
+      Local web to <strong>validate the contract</strong> (not the final face of the
+      project; that will be Unreal). It only manages what is <strong>on-chain</strong>:
+      ownership, economy, dependencies and progress. The <em>use</em> of the items
+      (spending arrows, drinking potions, slots) belongs to Unreal and is NOT here.
     </p>
 
-    <button id="connectBtn">Conectar wallet</button>
+    <button id="connectBtn">Connect wallet</button>
     <div id="account" class="muted"></div>
     <div id="network" class="muted"></div>
 
     <div id="status" class="hidden"></div>
 
-    <!-- Tienda: 10 items con su precio, campo de cantidad y botón comprar -->
+    <!-- Store: 10 items with their price, quantity field and buy button -->
     <section>
-      <h2>Tienda</h2>
+      <h2>Store</h2>
       <div id="store"></div>
     </section>
 
-    <!-- Inventario on-chain del jugador -->
+    <!-- Player's on-chain inventory -->
     <section>
-      <h2>Tu inventario (balanceOf)</h2>
-      <div id="inventory" class="muted">Conecta tu wallet para ver tu inventario.</div>
+      <h2>Your inventory (balanceOf)</h2>
+      <div id="inventory" class="muted">Connect your wallet to see your inventory.</div>
     </section>
 
-    <!-- Progreso y medallones (SOLO LECTURA): para verificar reglas y logros -->
+    <!-- Progress and medallions (READ ONLY): to verify rules and achievements -->
     <section>
-      <h2>Progreso y medallones</h2>
-      <div id="progress" class="muted">Conecta tu wallet para ver tu progreso.</div>
+      <h2>Progress and medallions</h2>
+      <div id="progress" class="muted">Connect your wallet to see your progress.</div>
     </section>
 
     <script src="./app.js"></script>

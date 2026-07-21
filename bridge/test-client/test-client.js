@@ -1,30 +1,30 @@
 #!/usr/bin/env node
 /* =============================================================================
- * test-client.js — Simula lo que hará UNREAL contra la API del bridge.
+ * test-client.js — Simulates what UNREAL will do against the bridge API.
  *
- * Herramienta de VALIDACIÓN (no es parte del producto). Reproduce el camino que
- * seguirá el juego: POST de una intención de compra + polling del estado, con la
- * firma real ocurriendo en el navegador (web del bridge + MetaMask).
+ * VALIDATION tool (not part of the product). It reproduces the path the game
+ * will follow: POST of a purchase intent + status polling, with the real
+ * signing happening in the browser (bridge web + MetaMask).
  *
- * Sin dependencias: solo el módulo `http` nativo de Node. Pensado para ejecutarse
- * en WINDOWS (donde corre el server del bridge y vive Node); desde WSL no se
- * alcanza http://localhost:8787.
+ * No dependencies: only Node's native `http` module. Meant to run on WINDOWS
+ * (where the bridge server runs and Node lives); from WSL you cannot reach
+ * http://localhost:8787.
  *
- * Uso:   node test-client.js <address 0x...> <itemId 0-9> <quantity >=1>
- * Salida: exit 0 = done · 1 = error · 2 = args inválidos · 3 = timeout · 4 = server caído
+ * Usage: node test-client.js <address 0x...> <itemId 0-9> <quantity >=1>
+ * Output: exit 0 = done · 1 = error · 2 = invalid args · 3 = timeout · 4 = server down
  * ===========================================================================*/
 
 const http = require("http");
 
 const BASE = process.env.BRIDGE_URL || "http://localhost:8787";
-const POLL_MS = 1500; // intervalo de polling
-const TIMEOUT_MS = 90000; // 90 s máximo esperando la firma
+const POLL_MS = 1500; // polling interval
+const TIMEOUT_MS = 90000; // 90 s max waiting for the signature
 
-// ── HTTP helper (sin dependencias). Devuelve { status, json, raw }. ──────────
+// ── HTTP helper (no dependencies). Returns { status, json, raw }. ────────────
 function request(method, urlPath, body) {
   return new Promise((resolve, reject) => {
     const u = new URL(BASE + urlPath);
-    const payload = body ? JSON.stringify(body) : null; // JSON serializado: sin líos de comillas
+    const payload = body ? JSON.stringify(body) : null; // serialized JSON: no quoting headaches
     const opts = {
       hostname: u.hostname,
       port: u.port,
@@ -44,7 +44,7 @@ function request(method, urlPath, body) {
         try {
           json = data ? JSON.parse(data) : null;
         } catch {
-          /* respuesta no-JSON: se queda en raw */
+          /* non-JSON response: kept in raw */
         }
         resolve({ status: res.statusCode, json, raw: data });
       });
@@ -60,34 +60,34 @@ const itemOf = (inv, id) => (inv?.items || []).find((i) => Number(i.id) === id);
 
 function usage(msg) {
   if (msg) console.error(`\n  ✗ ${msg}`);
-  console.error("\n  Uso: node test-client.js <address 0x...> <itemId 0-9> <quantity >=1>");
-  console.error("  Ej:  node test-client.js 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 6 5\n");
+  console.error("\n  Usage: node test-client.js <address 0x...> <itemId 0-9> <quantity >=1>");
+  console.error("  E.g.:  node test-client.js 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 6 5\n");
   process.exit(2);
 }
 
 function serverDown(err) {
-  console.error(`\n  ✗ No se pudo contactar con el bridge en ${BASE}.`);
-  console.error("    ¿Está 'node server.js' corriendo en Windows?");
-  console.error("    ¿Está la web del bridge abierta con MetaMask conectado (para firmar)?");
-  console.error(`    Detalle: ${err?.code || err?.message || err}`);
+  console.error(`\n  ✗ Could not contact the bridge at ${BASE}.`);
+  console.error("    Is 'node server.js' running on Windows?");
+  console.error("    Is the bridge web open with MetaMask connected (to sign)?");
+  console.error(`    Detail: ${err?.code || err?.message || err}`);
   process.exit(4);
 }
 
 async function main() {
-  // ── Validación de argumentos ───────────────────────────────────────────────
+  // ── Argument validation ─────────────────────────────────────────────────────
   const [address, itemIdRaw, quantityRaw] = process.argv.slice(2);
-  if (!address || itemIdRaw === undefined || quantityRaw === undefined) usage("Faltan argumentos.");
-  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) usage(`address inválida: "${address}" (debe ser 0x + 40 hex).`);
+  if (!address || itemIdRaw === undefined || quantityRaw === undefined) usage("Missing arguments.");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) usage(`invalid address: "${address}" (must be 0x + 40 hex).`);
   const itemId = Number(itemIdRaw);
   const quantity = Number(quantityRaw);
-  if (!Number.isInteger(itemId) || itemId < 0 || itemId > 9) usage(`itemId inválido: "${itemIdRaw}" (entero 0-9).`);
-  if (!Number.isInteger(quantity) || quantity < 1) usage(`quantity inválida: "${quantityRaw}" (entero >= 1).`);
+  if (!Number.isInteger(itemId) || itemId < 0 || itemId > 9) usage(`invalid itemId: "${itemIdRaw}" (integer 0-9).`);
+  if (!Number.isInteger(quantity) || quantity < 1) usage(`invalid quantity: "${quantityRaw}" (integer >= 1).`);
 
   console.log(`\n  Bridge:  ${BASE}`);
   console.log(`  Address: ${address}`);
-  console.log(`  Compra:  itemId ${itemId} × ${quantity}\n`);
+  console.log(`  Buy:     itemId ${itemId} × ${quantity}\n`);
 
-  // ── 1) Inventario ANTES ─────────────────────────────────────────────────────
+  // ── 1) Inventory BEFORE ───────────────────────────────────────────────────────
   let invBefore;
   try {
     const r = await request("GET", `/api/inventory?address=${address}`);
@@ -101,9 +101,9 @@ async function main() {
   }
   const name = itemOf(invBefore, itemId)?.name || `item ${itemId}`;
   const balBefore = BigInt(itemOf(invBefore, itemId)?.quantity ?? "0");
-  console.log(`  [1] Balance ANTES de "${name}": ${balBefore}`);
+  console.log(`  [1] Balance BEFORE of "${name}": ${balBefore}`);
 
-  // ── 2) POST intención de compra ─────────────────────────────────────────────
+  // ── 2) POST purchase intent ───────────────────────────────────────────────────
   let requestId;
   try {
     const r = await request("POST", "/api/purchase-intent", { address, itemId, quantity });
@@ -115,10 +115,10 @@ async function main() {
   } catch (e) {
     serverDown(e);
   }
-  console.log(`  [2] Intención registrada. requestId = ${requestId}`);
-  console.log("      ➜ La web del bridge (con MetaMask) debe firmarla.\n");
+  console.log(`  [2] Intent registered. requestId = ${requestId}`);
+  console.log("      ➜ The bridge web (with MetaMask) must sign it.\n");
 
-  // ── 3) Polling del estado ───────────────────────────────────────────────────
+  // ── 3) Status polling ─────────────────────────────────────────────────────────
   const deadline = Date.now() + TIMEOUT_MS;
   let last = null;
   while (Date.now() < deadline) {
@@ -136,32 +136,32 @@ async function main() {
     }
 
     if (st.status !== last) {
-      console.log(`  [3] estado: ${st.status}`);
-      if (st.status === "signing") console.log("      ⏳ Firma la transacción en MetaMask (en el navegador)…");
+      console.log(`  [3] status: ${st.status}`);
+      if (st.status === "signing") console.log("      ⏳ Sign the transaction in MetaMask (in the browser)…");
       last = st.status;
     } else {
-      process.stdout.write("."); // sigue en el mismo estado: latido
+      process.stdout.write("."); // still in the same state: heartbeat
     }
 
-    // ── 4) Resolución ──────────────────────────────────────────────────────────
+    // ── 4) Resolution ────────────────────────────────────────────────────────────
     if (st.status === "done") {
       console.log(`\n  [4] ✅ DONE · txHash = ${st.txHash}`);
       try {
         const r = await request("GET", `/api/inventory?address=${address}`);
         const after = BigInt(itemOf(r.json, itemId)?.quantity ?? "0");
-        console.log(`      Balance DESPUÉS de "${name}": ${after}  (Δ +${after - balBefore})\n`);
+        console.log(`      Balance AFTER of "${name}": ${after}  (Δ +${after - balBefore})\n`);
       } catch (e) {
         serverDown(e);
       }
       process.exit(0);
     }
     if (st.status === "error") {
-      console.error(`\n  [4] ❌ ERROR: ${st.error || "(sin detalle)"}\n`);
+      console.error(`\n  [4] ❌ ERROR: ${st.error || "(no detail)"}\n`);
       process.exit(1);
     }
   }
 
-  console.error(`\n  ✗ TIMEOUT tras ${TIMEOUT_MS / 1000}s sin resolver (¿firmaste en MetaMask?).\n`);
+  console.error(`\n  ✗ TIMEOUT after ${TIMEOUT_MS / 1000}s without resolving (did you sign in MetaMask?).\n`);
   process.exit(3);
 }
 
