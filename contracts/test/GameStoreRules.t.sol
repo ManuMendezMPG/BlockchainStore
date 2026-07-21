@@ -104,13 +104,25 @@ contract GameStoreRulesTest is Test {
         store.buy{value: P_FLECHA}(FLECHA, 1);
     }
 
-    function test_RevertWhen_ArrowsExceedQuiverCapacity() public {
+    function test_RevertWhen_BuyArrowsWithoutQuiver() public {
+        // Con arco pero SIN ningún carcaj, comprar flechas sigue revertiendo:
+        // el requisito de equipo (arco + carcaj) se mantiene on-chain.
         vm.startPrank(player);
         store.buy{value: P_ARCO}(ARCO, 1);
-        store.buy{value: P_CARCAJ_5}(CARCAJ_5, 1); // cap 5
-        vm.expectRevert(abi.encodeWithSelector(GameStore.QuiverCapacityExceeded.selector, 5, 0, 6));
-        store.buy{value: P_FLECHA * 6}(FLECHA, 6);
+        vm.expectRevert(GameStore.NeedQuiver.selector);
+        store.buy{value: P_FLECHA}(FLECHA, 1);
         vm.stopPrank();
+    }
+
+    function test_BuyArrowsBeyondCapacity() public {
+        // La CAPACIDAD ya no se valida on-chain (se movió a Unreal): con arco y un
+        // carcaj_5 (antes cap 5) se pueden comprar más de 5 flechas sin revertir.
+        vm.startPrank(player);
+        store.buy{value: P_ARCO}(ARCO, 1);
+        store.buy{value: P_CARCAJ_5}(CARCAJ_5, 1);
+        store.buy{value: P_FLECHA * 6}(FLECHA, 6); // 6 > 5: antes revertía, ahora OK
+        vm.stopPrank();
+        assertEq(store.balanceOf(player, FLECHA), 6, "compra por encima de la capacidad");
     }
 
     function test_BuyArrowsWithinCapacity() public {
@@ -137,20 +149,24 @@ contract GameStoreRulesTest is Test {
         assertEq(store.quiverCapacity(player), 10);
     }
 
-    // ───────────────── Dependencia: pociones/botellas ────────────────
+    // ───────────────── Pociones: SIN dependencia de botella ──────────
+    // La regla "necesitas una botella vacía para obtener una poción" se movió a
+    // la capa de juego (Unreal). On-chain, la tienda vende pociones libremente.
 
-    function test_RevertWhen_BuyPotionWithoutBottle() public {
+    function test_BuyPotionWithoutBottle() public {
+        // Comprar poción SIN tener ninguna botella ahora FUNCIONA.
         vm.prank(player);
-        vm.expectRevert(abi.encodeWithSelector(GameStore.NeedEmptyBottle.selector, 1, 0));
         store.buy{value: P_POCION}(POCION_VIDA, 1);
+        assertEq(store.balanceOf(player, POCION_VIDA), 1, "obtuvo la pocion sin botella");
     }
 
-    function test_BuyPotionConsumesBottle() public {
+    function test_BuyPotionDoesNotConsumeBottle() public {
+        // Si el jugador tiene botellas, comprar una poción NO las consume on-chain.
         vm.startPrank(player);
         store.buy{value: P_BOTELLA * 2}(BOTELLA_VACIA, 2);
         store.buy{value: P_POCION}(POCION_VIDA, 1);
         vm.stopPrank();
-        assertEq(store.balanceOf(player, BOTELLA_VACIA), 1, "consumio 1 botella");
+        assertEq(store.balanceOf(player, BOTELLA_VACIA), 2, "las botellas NO se consumen");
         assertEq(store.balanceOf(player, POCION_VIDA), 1, "obtuvo la pocion");
     }
 

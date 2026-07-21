@@ -4,19 +4,19 @@ pragma solidity ^0.8.20;
 import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-/// @title Achievements — medallones de logros (ERC-1155) acuñados por GameStore.
-/// @notice Tres medallones:
-///   - ARQUERO (soulbound): por comprar 20 flechas históricas. Desbloquea carcaj_20.
-///   - MERCADER (transferible): por superar un gasto acumulado; rareza pseudoaleatoria.
-///   - COLECCIONISTA (soulbound): por poseer el set completo.
-/// @dev Solo el `minter` autorizado (será GameStore) puede acuñar.
+/// @title Achievements — achievement medallions (ERC-1155) minted by GameStore.
+/// @notice Three medallions:
+///   - ARQUERO (soulbound): for buying 20 historical arrows. Unlocks carcaj_20.
+///   - MERCADER (transferable): for exceeding an accumulated spend; pseudo-random rarity.
+///   - COLECCIONISTA (soulbound): for owning the full set.
+/// @dev Only the authorized `minter` (will be GameStore) can mint.
 contract Achievements is ERC1155, Ownable {
     // ─────────────────────────── IDs ─────────────────────────────────
     uint256 public constant ARQUERO = 0;
     uint256 public constant MERCADER = 1;
     uint256 public constant COLECCIONISTA = 2;
 
-    /// @notice Rareza del MERCADER. None solo es el valor por defecto (sin medallón).
+    /// @notice MERCADER rarity. None is only the default value (no medallion).
     enum Rarity {
         None,
         Bronce,
@@ -24,39 +24,39 @@ contract Achievements is ERC1155, Ownable {
         Oro
     }
 
-    // ─────────────────────────── Estado ──────────────────────────────
-    /// @notice Dirección autorizada a acuñar (será GameStore). La fija el owner.
+    // ─────────────────────────── State ───────────────────────────────
+    /// @notice Address authorized to mint (will be GameStore). Set by the owner.
     address public minter;
-    /// @notice Rareza del MERCADER por jugador (se fija al acuñar).
+    /// @notice MERCADER rarity per player (set at mint time).
     mapping(address account => Rarity rarity) public mercaderRarity;
-    /// @dev Contador para variar la entrada de la pseudoaleatoriedad entre llamadas.
+    /// @dev Counter to vary the pseudo-randomness input between calls.
     uint256 private _nonce;
 
-    // ─────────────────────────── Errores ─────────────────────────────
+    // ─────────────────────────── Errors ──────────────────────────────
     error NotMinter();
     error AlreadyUnlocked(address account, uint256 id);
     error Soulbound(uint256 id);
 
-    // ─────────────────────────── Eventos ─────────────────────────────
+    // ─────────────────────────── Events ──────────────────────────────
     event MinterUpdated(address indexed minter);
-    /// @notice Hito desbloqueado. `rarity` solo es relevante para MERCADER (0 en el resto).
+    /// @notice Milestone unlocked. `rarity` is only relevant for MERCADER (0 otherwise).
     event AchievementUnlocked(address indexed player, uint256 indexed medallionId, uint8 rarity);
 
     constructor(string memory uri_) ERC1155(uri_) Ownable(msg.sender) {}
 
-    // ──────────────────────── Control de acceso ──────────────────────
+    // ──────────────────────── Access control ─────────────────────────
     modifier onlyMinter() {
         if (msg.sender != minter) revert NotMinter();
         _;
     }
 
-    /// @notice Autoriza qué dirección puede acuñar (se llamará con GameStore).
+    /// @notice Authorizes which address can mint (will be called with GameStore).
     function setMinter(address minter_) external onlyOwner {
         minter = minter_;
         emit MinterUpdated(minter_);
     }
 
-    // ──────────────────────────── Vistas ─────────────────────────────
+    // ──────────────────────────── Views ──────────────────────────────
     function isUnlocked(address account, uint256 id) public view returns (bool) {
         return balanceOf(account, id) > 0;
     }
@@ -65,9 +65,9 @@ contract Achievements is ERC1155, Ownable {
         return balanceOf(account, ARQUERO) > 0;
     }
 
-    // ─────────────────────────── Acuñación ───────────────────────────
-    // Cada función comprueba que el logro no esté ya desbloqueado (no se acuña
-    // dos veces) y solo la puede llamar el `minter`.
+    // ─────────────────────────── Minting ─────────────────────────────
+    // Each function checks that the achievement is not already unlocked (it is
+    // not minted twice) and can only be called by the `minter`.
 
     function mintArquero(address to) external onlyMinter {
         if (isUnlocked(to, ARQUERO)) revert AlreadyUnlocked(to, ARQUERO);
@@ -89,19 +89,19 @@ contract Achievements is ERC1155, Ownable {
         emit AchievementUnlocked(to, MERCADER, uint8(r));
     }
 
-    /// @dev Rareza pseudoaleatoria con pesos: Bronce 60%, Plata 30%, Oro 10%.
+    /// @dev Pseudo-random rarity with weights: Bronce 60%, Plata 30%, Oro 10%.
     ///
-    /// ⚠️⚠️ AVISO DE SEGURIDAD ⚠️⚠️
-    /// Esto NO es aleatoriedad segura para producción. `block.timestamp`,
-    /// `block.prevrandao` y `blockhash` son conocidos/observables y, en cierto
-    /// grado, INFLUENCIABLES por el proponente del bloque (validador). Un actor
-    /// con incentivo económico podría:
-    ///   - Calcular el resultado ANTES de enviar la transacción (todo es público)
-    ///     y solo enviarla cuando le toque "Oro" (especialmente desde un contrato).
-    ///   - Reordenar/retrasar la inclusión para sesgar el resultado.
-    /// En producción se usa un ORÁCULO DE ALEATORIEDAD verificable, p. ej.
-    /// Chainlink VRF, que entrega un número aleatorio con prueba criptográfica en
-    /// una segunda transacción (callback). Aquí lo dejamos simple por didáctica.
+    /// ⚠️⚠️ SECURITY WARNING ⚠️⚠️
+    /// This is NOT production-safe randomness. `block.timestamp`,
+    /// `block.prevrandao` and `blockhash` are known/observable and, to some
+    /// degree, INFLUENCEABLE by the block proposer (validator). An actor with an
+    /// economic incentive could:
+    ///   - Compute the result BEFORE sending the transaction (everything is public)
+    ///     and only send it when they'd get "Oro" (especially from a contract).
+    ///   - Reorder/delay inclusion to bias the result.
+    /// In production a verifiable RANDOMNESS ORACLE is used, e.g. Chainlink VRF,
+    /// which delivers a random number with a cryptographic proof in a second
+    /// transaction (callback). Here we keep it simple for teaching purposes.
     function _rollRarity(address to) internal returns (Rarity) {
         uint256 rand = uint256(
             keccak256(
@@ -121,11 +121,11 @@ contract Achievements is ERC1155, Ownable {
     }
 
     // ───────────────────────────── Soulbound ─────────────────────────
-    /// @dev `_update` es el hook central de transferencia en ERC-1155 (OZ v5):
-    ///      mint => from == address(0); burn => to == address(0); transferencia
-    ///      real => ambos distintos de cero. Bloqueamos SOLO las transferencias
-    ///      reales de ARQUERO y COLECCIONISTA; mint y burn siguen permitidos, y
-    ///      MERCADER se comporta como un ERC-1155 normal (transferible).
+    /// @dev `_update` is the central transfer hook in ERC-1155 (OZ v5):
+    ///      mint => from == address(0); burn => to == address(0); real transfer
+    ///      => both non-zero. We block ONLY the real transfers of ARQUERO and
+    ///      COLECCIONISTA; mint and burn are still allowed, and MERCADER behaves
+    ///      like a normal ERC-1155 (transferable).
     function _update(address from, address to, uint256[] memory ids, uint256[] memory values) internal override {
         if (from != address(0) && to != address(0)) {
             for (uint256 i = 0; i < ids.length; i++) {

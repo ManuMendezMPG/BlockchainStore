@@ -5,15 +5,15 @@ import {Script, console} from "forge-std/Script.sol";
 import {GameStore} from "../src/GameStore.sol";
 import {Achievements} from "../src/Achievements.sol";
 
-/// @title DeployGameStore — despliega GameStore + Achievements y los conecta.
-/// @dev ORDEN DE DESPLIEGUE IMPORTANTE:
-///      1) GameStore PRIMERO (nonce 0 de la cuenta #0) → cae en la dirección
-///         determinista 0x5FbDB2315678afecb367f032d93F642f64180aa3 que usa el bridge.
-///      2) Achievements DESPUÉS (nonce 1).
-///      La dirección de un contrato depende de (deployer, nonce) en el momento del
-///      CREATE; las transacciones posteriores (setters, setItem) no la cambian.
+/// @title DeployGameStore — deploys GameStore + Achievements and connects them.
+/// @dev DEPLOYMENT ORDER MATTERS:
+///      1) GameStore FIRST (nonce 0 of account #0) → lands on the deterministic
+///         address 0x5FbDB2315678afecb367f032d93F642f64180aa3 that the bridge uses.
+///      2) Achievements AFTER (nonce 1).
+///      A contract's address depends on (deployer, nonce) at the moment of the
+///      CREATE; later transactions (setters, setItem) do not change it.
 contract DeployGameStore is Script {
-    // IDs de items.
+    // Item IDs.
     uint256 constant ESPADA = 0;
     uint256 constant ESCUDO = 1;
     uint256 constant ARCO = 2;
@@ -28,19 +28,19 @@ contract DeployGameStore is Script {
     function run() external returns (GameStore store, Achievements achievements) {
         vm.startBroadcast();
 
-        // 1) GameStore primero → dirección determinista para el bridge.
+        // 1) GameStore first → deterministic address for the bridge.
         store = new GameStore("ipfs://game-items/{id}.json");
 
-        // 2) Achievements después.
+        // 2) Achievements after.
         achievements = new Achievements("ipfs://achievements/{id}.json");
 
-        // 3) Conexión entre contratos:
-        //    - GameStore necesita conocer a Achievements para acuñar medallones.
-        //    - Achievements autoriza a GameStore como su único `minter`.
+        // 3) Connection between contracts:
+        //    - GameStore needs to know Achievements to mint medallions.
+        //    - Achievements authorizes GameStore as its only `minter`.
         store.setAchievements(address(achievements));
         achievements.setMinter(address(store));
 
-        // 4) Catálogo completo (precios en wei vía sufijo `ether`).
+        // 4) Full catalog (prices in wei via the `ether` suffix).
         store.setItem(ESPADA, 0.01 ether);
         store.setItem(ESCUDO, 0.008 ether);
         store.setItem(ARCO, 0.012 ether);
@@ -54,15 +54,15 @@ contract DeployGameStore is Script {
 
         vm.stopBroadcast();
 
-        // 5) Logs informativos.
+        // 5) Informative logs.
         console.log("==========================================");
-        console.log("GameStore    desplegado en:", address(store));
-        console.log("Achievements desplegado en:", address(achievements));
+        console.log("GameStore    deployed at:  ", address(store));
+        console.log("Achievements deployed at:  ", address(achievements));
         console.log("Owner:                     ", store.owner());
-        console.log("Minter de Achievements:    ", achievements.minter());
+        console.log("Achievements minter:       ", achievements.minter());
         console.log("------------------------------------------");
-        console.log("Catalogo: 10 items (ids 0-9) dados de alta.");
-        console.log("Medallones: ARQUERO(0) soulbound, MERCADER(1) transferible, COLECCIONISTA(2) soulbound.");
+        console.log("Catalog: 10 items (ids 0-9) listed.");
+        console.log("Medallions: ARQUERO(0) soulbound, MERCADER(1) transferable, COLECCIONISTA(2) soulbound.");
         console.log("==========================================");
     }
 }
