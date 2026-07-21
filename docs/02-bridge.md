@@ -1,31 +1,32 @@
-# 02 — El puente web: MetaMask ↔ contrato
+# 02 — The web bridge: MetaMask ↔ contract
 
-> Parte de la guía de aprendizaje del proyecto. Continúa
-> [01 — El smart contract](./01-smart-contract.md). Aquí explicamos la web local
-> que conecta al jugador con el contrato `GameStore`, centrándonos en el **porqué**
-> de cada decisión.
+> Part of the project's learning guide. Continues
+> [01 — The smart contract](./01-smart-contract.md). Here we explain the local web
+> that connects the player with the `GameStore` contract, focusing on the **why**
+> of each decision. The HTTP API for the game and the SIWE login are later pieces,
+> covered in [05](./05-api-and-unreal-client.md) and [06](./06-login-siwe.md).
 
 ---
 
-## 1. Qué es el puente y qué problema resuelve
+## 1. What the bridge is and what problem it solves
 
-El juego (Unreal Engine) **no puede hablar con MetaMask directamente**. MetaMask es
-una extensión de **navegador**: vive en el contexto de una página web y expone su API
-(`window.ethereum`) únicamente a JavaScript que corre en esa página. Un ejecutable de
-Unreal no tiene `window.ethereum`, ni un navegador embebido con la extensión, ni forma
-nativa de pedirle al usuario que firme una transacción.
+The game (Unreal Engine) **cannot talk to MetaMask directly**. MetaMask is a
+**browser** extension: it lives in the context of a web page and exposes its API
+(`window.ethereum`) only to JavaScript running on that page. An Unreal executable
+has no `window.ethereum`, no embedded browser with the extension, and no native way
+to ask the user to sign a transaction.
 
-Además, **el juego no debe tocar la clave privada del jugador**. Si el juego firmara
-transacciones, tendría que custodiar la clave — justo lo que queremos evitar. La clave
-debe quedarse donde el usuario ya confía en tenerla: MetaMask.
+Besides, **the game must not touch the player's private key**. If the game signed
+transactions, it would have to custody the key — exactly what we want to avoid. The
+key must stay where the user already trusts having it: MetaMask.
 
-**El puente es el intermediario** que resuelve ambos problemas:
+**The bridge is the intermediary** that solves both problems:
 
 ```
 ┌──────────────┐   HTTP/local    ┌───────────────────────────┐  window.ethereum  ┌──────────┐
-│ Juego Unreal │ ───────────────►│  Puente web (Node + web)  │ ────────────────► │ MetaMask │
-│  (cliente)   │ ◄───────────────│  HTML + JS + ethers.js    │ ◄──────────────── │ (firma)  │
-└──────────────┘   resultado     └───────────────────────────┘                   └────┬─────┘
+│ Unreal game  │ ───────────────►│  Web bridge (Node + web)  │ ────────────────► │ MetaMask │
+│  (client)    │ ◄───────────────│  HTML + JS + ethers.js    │ ◄──────────────── │ (signs)  │
+└──────────────┘   result        └───────────────────────────┘                   └────┬─────┘
                                                                                        │ JSON-RPC
                                                                                        ▼
                                                                                   ┌──────────┐
@@ -34,356 +35,387 @@ debe quedarse donde el usuario ya confía en tenerla: MetaMask.
                                                                                   └──────────┘
 ```
 
-El puente es una **página web servida en local**. Tiene `window.ethereum`, así que
-puede pedir a MetaMask que conecte la cuenta y firme. El juego solo le pedirá acciones
-("compra el item 0") y recibirá resultados, **sin ver nunca la clave**.
+The bridge is a **locally served web page**. It has `window.ethereum`, so it can ask
+MetaMask to connect the account and sign. The game only asks it for actions ("buy
+item 0") and receives results, **without ever seeing the key**.
 
-> En esta fase el puente funciona **de forma aislada** (lo manejas tú desde el
-> navegador). La conexión juego↔puente es la siguiente pieza; la base ya está lista.
+> This document covers the browser↔contract piece. On top of it, the bridge later
+> grows an **HTTP/JSON API** so the game can drive purchases and log in — see
+> [05 — API and Unreal client](./05-api-and-unreal-client.md) and
+> [06 — SIWE login](./06-login-siwe.md).
 
 ---
 
-## 2. Arquitectura de la pieza
+## 2. Architecture of the piece
 
 ```
 bridge/
-├── server.js                 # Servidor estático mínimo (Node, sin dependencias)
+├── server.js                 # Node server: serves the web AND exposes the /api/* JSON API
 └── public/
-    ├── index.html            # Estructura + estilos + carga de ethers.js (CDN)
-    ├── app.js                # Lógica: conectar, leer, comprar, quemar
-    └── abi/GameStore.json    # ABI extraído de los artefactos de Foundry
+    ├── index.html            # Structure + styles + ethers.js load (CDN)
+    ├── app.js                # Logic: connect, read, buy, burn, progress, intent consumer, SIWE
+    └── abi/
+        ├── GameStore.json    # ABI extracted from Foundry artifacts
+        └── Achievements.json # ABI of the achievements contract
 ```
 
-Cuatro componentes, cada uno con una responsabilidad:
+Four components, each with a responsibility:
 
-1. **Servidor Node estático** (`server.js`). Su único trabajo es **servir los
-   ficheros** (`index.html`, `app.js`, el ABI) por HTTP en `http://localhost:8787`.
-   No tiene lógica de negocio. ¿Por qué hace falta un servidor para una web tan
-   simple? Porque **abrir el HTML como `file://` no funciona con MetaMask**: bajo
-   ese esquema el navegador no inyecta `window.ethereum` de forma fiable y bloquea
-   `fetch()` (que usamos para cargar el ABI). Servir por `http://localhost` da un
-   *origen* web real y todo funciona.
+1. **Node server** (`server.js`). Serves the **files** (`index.html`, `app.js`, the
+   ABIs) over HTTP at `http://localhost:8787`, and also exposes the `/api/*` JSON
+   API (docs 05/06). Why do we need a server for such a simple web at all? Because
+   **opening the HTML as `file://` doesn't work with MetaMask**: under that scheme
+   the browser doesn't inject `window.ethereum` reliably and blocks `fetch()` (which
+   we use to load the ABI). Serving over `http://localhost` gives a real web
+   *origin* and everything works.
 
-2. **Página web** (`index.html`). La estructura (botón de conectar, lista de la
-   tienda, lista del inventario) y los estilos. Carga ethers.js y `app.js`.
+   > On dependencies: the **reads** in `server.js` are done with raw `eth_call` over
+   > JSON-RPC, with **zero dependencies**. The SIWE login (doc 06) later adds two
+   > libraries (`siwe`, `ethers`) *on purpose*, because crypto verification must not
+   > be homemade. That trade-off is argued in [06 §6](./06-login-siwe.md).
 
-3. **Lógica JS** (`app.js`). Conecta con MetaMask, lee el estado del contrato
-   (tienda e inventario), construye las transacciones de compra/quema y maneja los
-   errores. Es el cerebro del puente.
+2. **Web page** (`index.html`). The structure (connect button, store list, inventory
+   list, progress panel) and the styles. Loads ethers.js and `app.js`.
 
-4. **El ABI** (`abi/GameStore.json`). El "contrato de interfaz": le dice a ethers
-   qué funciones tiene `GameStore`, qué argumentos reciben y qué devuelven. Se
-   **extrae de los artefactos de Foundry** (que se generan al compilar):
+3. **JS logic** (`app.js`). Connects to MetaMask, reads the contract state (store and
+   inventory), builds the buy/burn transactions and handles errors. It's the brain
+   of the bridge. It has since grown to also show progress/medallions and to act as
+   the automatic consumer of the game's purchase/login intents (docs 05/06).
+
+4. **The ABIs** (`abi/*.json`). The "interface contract": they tell ethers what
+   functions `GameStore` and `Achievements` have, what arguments they take and what
+   they return. They are **extracted from the Foundry artifacts** (generated on
+   compile):
 
    ```bash
    cd contracts
    forge inspect src/GameStore.sol:GameStore abi --json > ../bridge/public/abi/GameStore.json
+   forge inspect src/Achievements.sol:Achievements abi --json > ../bridge/public/abi/Achievements.json
    ```
 
-   > **Por qué extraerlo y no escribirlo a mano:** el ABI es la fuente de verdad de
-   > la interfaz. Si cambias el contrato y recompilas, regeneras el ABI con ese
-   > comando y la web queda sincronizada. Escribirlo a mano es frágil y propenso a
-   > errores de tipos.
+   > **Why extract it and not hand-write it:** the ABI is the source of truth for the
+   > interface. If you change the contract and recompile, you regenerate the ABI with
+   > that command and the web stays in sync. Hand-writing it is fragile and prone to
+   > type errors.
 
 ---
 
-## 3. Conceptos clave de ethers.js
+## 3. Key ethers.js concepts
 
-### Provider vs Signer — la distinción fundamental
+### Provider vs Signer — the fundamental distinction
 
-- **Provider** = conexión de **solo lectura** a la blockchain. Consulta estado
-  (balances, precios, bloques). **No puede firmar nada.** En la web usamos dos:
-  - `new ethers.JsonRpcProvider(RPC_URL)` → habla **directamente** con el nodo Anvil.
-    Lo usamos para mostrar los precios de la tienda **antes de conectar la wallet**.
-  - `new ethers.BrowserProvider(window.ethereum)` → habla **a través de MetaMask**.
+- **Provider** = **read-only** connection to the blockchain. Queries state
+  (balances, prices, blocks). **It cannot sign anything.** In the web we use two:
+  - `new ethers.JsonRpcProvider(RPC_URL)` → talks **directly** to the Anvil node. We
+    use it to show the store prices **before connecting the wallet**.
+  - `new ethers.BrowserProvider(window.ethereum)` → talks **through MetaMask**.
 
-- **Signer** = representa **una cuenta concreta** y **puede firmar transacciones**.
-  Se obtiene de MetaMask con `provider.getSigner()`. Lo más importante: **la clave
-  privada vive dentro de MetaMask**. El signer solo *pide* firmas; tu código nunca
-  ve ni toca la clave.
+- **Signer** = represents **a specific account** and **can sign transactions**. It's
+  obtained from MetaMask with `provider.getSigner()`. Most importantly: **the private
+  key lives inside MetaMask**. The signer only *requests* signatures; your code never
+  sees or touches the key.
 
-> Regla mental: si solo **lees**, te basta un *provider*. Si vas a **cambiar estado**
-> (y por tanto firmar y pagar gas), necesitas un *signer*.
+> Mental rule: if you only **read**, a *provider* is enough. If you're going to
+> **change state** (and therefore sign and pay gas), you need a *signer*.
 
-### Cómo se conecta con MetaMask
+### How it connects to MetaMask
 
-Son tres pasos, visibles en `connectWallet()`:
+Three steps, visible in `connectWallet()`:
 
 ```js
-// 1) Envolver el objeto que MetaMask inyecta (estándar EIP-1193).
+// 1) Wrap the object MetaMask injects (EIP-1193 standard).
 const browserProvider = new ethers.BrowserProvider(window.ethereum);
 
-// 2) Pedir permiso para acceder a las cuentas → ABRE EL POPUP de MetaMask.
+// 2) Request permission to access the accounts → OPENS THE MetaMask POPUP.
 await browserProvider.send("eth_requestAccounts", []);
 
-// 3) Obtener el signer (la cuenta conectada que firmará).
+// 3) Get the signer (the connected account that will sign).
 const signer = await browserProvider.getSigner();
 const account = await signer.getAddress();
 ```
 
-- `window.ethereum` es la API que **inyecta** la extensión MetaMask en la página.
-- `eth_requestAccounts` es la petición estándar que dispara el diálogo "¿Conectar
-  esta web a tu wallet?". Sin ella, no tenemos permiso para ver la cuenta.
-- Tras conectar, comprobamos la red con `await browserProvider.getNetwork()` y
-  avisamos si `chainId !== 31337n`. **En ethers v6 los chainId son `BigInt`** (por
-  eso el `n` final): hay que compararlos con BigInt, no con números normales.
+- `window.ethereum` is the API that the MetaMask extension **injects** into the page.
+- `eth_requestAccounts` is the standard request that triggers the "Connect this site
+  to your wallet?" dialog. Without it, we have no permission to see the account.
+- After connecting, we check the network with `await browserProvider.getNetwork()`
+  and warn if `chainId !== 31337n`. **In ethers v6 chainIds are `BigInt`** (hence the
+  trailing `n`): you must compare them with BigInt, not with plain numbers.
 
-También escuchamos cambios para no quedarnos con estado obsoleto:
+We also listen for changes so we don't keep stale state:
 
 ```js
 window.ethereum.on("accountsChanged", () => location.reload());
 window.ethereum.on("chainChanged",    () => location.reload());
 ```
 
-Recargar la página es la forma más simple y robusta de reflejar que el usuario
-cambió de cuenta o de red en MetaMask.
+Reloading the page is the simplest and most robust way to reflect that the user
+switched account or network in MetaMask.
 
 ### Read vs Write
 
-| | **Read** (función `view`) | **Write** (transacción) |
+| | **Read** (`view` function) | **Write** (transaction) |
 |---|---|---|
-| Usa | un **provider** | un **signer** |
-| ¿Abre MetaMask? | No | Sí (pide **firma**) |
-| ¿Cuesta gas? | No | Sí |
-| Resultado | valor inmediato | hay que **esperar** a que se mine |
+| Uses | a **provider** | a **signer** |
+| Opens MetaMask? | No | Yes (asks for a **signature**) |
+| Costs gas? | No | Yes |
+| Result | immediate value | you must **wait** for it to be mined |
 
 ```js
-// READ — contrato conectado a un provider. Inmediato, sin gas, sin popup.
+// READ — contract connected to a provider. Immediate, no gas, no popup.
 const price = await readContract.priceOf(0);           // BigInt (wei)
 const balance = await readContract.balanceOf(account, 0);
 
-// WRITE — contrato conectado al signer. MetaMask pide firma; esperamos confirmación.
+// WRITE — contract connected to the signer. MetaMask asks to sign; we await confirmation.
 const tx = await writeContract.buy(0, 1, { value: price });
-await tx.wait();   // ⏳ hasta que la transacción se incluye en un bloque
+await tx.wait();   // ⏳ until the transaction is included in a block
 ```
 
-Creamos **dos instancias** del contrato para que la diferencia sea explícita:
+We create **two instances** of the contract to make the difference explicit:
 
 ```js
-readContract  = new ethers.Contract(CONTRACT_ADDRESS, abi, readProvider); // solo lee
-writeContract = new ethers.Contract(CONTRACT_ADDRESS, abi, signer);       // lee y escribe
+readContract  = new ethers.Contract(CONTRACT_ADDRESS, abi, readProvider); // reads only
+writeContract = new ethers.Contract(CONTRACT_ADDRESS, abi, signer);       // reads and writes
 ```
 
-### Construir una transacción `payable` desde JS
+### Building a `payable` transaction from JS
 
-`buy(itemId, quantity)` es `payable`: recibe ETH. En ethers, el ETH a enviar va en
-un objeto de **overrides** como **último argumento** de la llamada:
+`buy(itemId, quantity)` is `payable`: it receives ETH. In ethers, the ETH to send
+goes in an **overrides** object as the **last argument** of the call:
 
 ```js
 const tx = await writeContract.buy(item.id, 1, { value: priceWei });
 //                                ───┬───  ┬   ────────┬─────────
-//                              argumentos   overrides: { value } → llega como msg.value
+//                              arguments   overrides: { value } → arrives as msg.value
 ```
 
-- Los primeros argumentos (`item.id`, `1`) son los parámetros de la función.
-- `{ value: priceWei }` indica cuánto ETH (en **wei**) adjuntar. Ese valor llega al
-  contrato como **`msg.value`** — exactamente lo que `buy` compara contra
-  `precio * cantidad`.
-- `priceWei` lo obtuvimos antes leyendo `priceOf(id)`, así que pagamos justo el
-  precio del item.
+- The first arguments (`item.id`, `1`) are the function parameters.
+- `{ value: priceWei }` indicates how much ETH (in **wei**) to attach. That value
+  reaches the contract as **`msg.value`** — exactly what `buy` compares against
+  `price * quantity`.
+- We got `priceWei` earlier by reading `priceOf(id)`, so we pay exactly the item's
+  price. (If we send too much, the contract now **refunds the excess** — see doc 01
+  §5.4.)
 
-`burn(account, id, value)` **no** es payable, así que se llama sin `{ value }`. El
-jugador quema sus propios tokens, y la extensión `ERC1155Burnable` del contrato se
-encarga de comprobar que es el dueño (ver doc 01).
+`burn(account, id, value)` is **not** payable, so it's called without `{ value }`.
+The player burns their own tokens, and the contract's `ERC1155Burnable` extension
+checks that they're the owner (see doc 01).
 
 ---
 
-## 4. Manejo de errores: `humanizeError` y el ABI completo
+## 4. Error handling: `humanizeError` and the full ABI
 
-Las cosas fallan: el usuario rechaza la firma, está en la red equivocada, no tiene
-fondos, o el contrato revierte. Una buena UI **traduce** esos fallos a algo legible.
-La función `humanizeError(err)` hace ese mapeo:
+Things fail: the user rejects the signature, is on the wrong network, has no funds,
+or the contract reverts. A good UI **translates** those failures into something
+readable. The `humanizeError(err)` function does that mapping:
 
 ```js
-if (err?.code === "ACTION_REJECTED") return "Has rechazado la firma en MetaMask.";
-if (err?.code === "INSUFFICIENT_FUNDS") return "Fondos insuficientes…";
-if (err?.revert?.name) { /* custom error del contrato → mensaje específico */ }
-if (err?.code === "NETWORK_ERROR") return "¿Está Anvil arrancado?";
+if (err?.code === "ACTION_REJECTED") return "You rejected the signature in MetaMask.";
+if (err?.code === "INSUFFICIENT_FUNDS") return "Insufficient funds…";
+if (err?.revert?.name) { /* contract custom error → specific message */ }
+if (err?.code === "NETWORK_ERROR") return "Is Anvil running?";
 ```
 
-ethers v6 normaliza muchos errores con un **`code`** estable
-(`ACTION_REJECTED`, `INSUFFICIENT_FUNDS`, `NETWORK_ERROR`…), lo que nos permite
-distinguirlos sin parsear cadenas frágiles.
+ethers v6 normalizes many errors with a stable **`code`**
+(`ACTION_REJECTED`, `INSUFFICIENT_FUNDS`, `NETWORK_ERROR`…), which lets us
+distinguish them without parsing fragile strings.
 
-### Por qué incluir el ABI **completo** (con los custom errors)
+### Why include the **full** ABI (with the custom errors)
 
-Cuando el contrato revierte con un *custom error* (p. ej. `InsufficientPayment`,
-`ItemNotListed`, `ERC1155MissingApprovalForAll`), lo que viaja por el cable es un
-**selector de 4 bytes** + sus datos codificados. Por sí solo, eso es ilegible.
+When the contract reverts with a *custom error* (e.g. `InsufficientPayment`,
+`ItemNotListed`, `ERC1155MissingApprovalForAll`), what travels over the wire is a
+**4-byte selector** + its encoded data. On its own, that's unreadable.
 
-Si el ABI que le diste a ethers **incluye la definición de esos errores**, ethers
-puede **decodificarlos** y rellenar `err.revert.name` y `err.revert.args`:
+If the ABI you gave ethers **includes the definition of those errors**, ethers can
+**decode them** and fill in `err.revert.name` and `err.revert.args`:
 
 ```js
 case "InsufficientPayment":
-  return `Pago insuficiente: el contrato pedía ${r.args?.[0]} wei.`;
+  return `Insufficient payment: the contract required ${r.args?.[0]} wei.`;
 case "ItemNotListed":
-  return `Ese item no existe en el catálogo (id ${r.args?.[0]}).`;
+  return `That item does not exist in the catalog (id ${r.args?.[0]}).`;
 ```
 
-Por eso guardamos el ABI **entero** (no solo las 4 funciones que usamos): trae todos
-los errores del contrato y de OpenZeppelin, y eso convierte un críptico
-`0xb99e2ab7` en *"Pago insuficiente: el contrato pedía 10000000000000000 wei"*. Sin
-el ABI completo, solo verías un hash. **El coste es trivial** (un fichero JSON algo
-más grande) y la mejora de DX es enorme.
+That's why we keep the **whole** ABI (not just the 4 functions we use): it carries
+all the contract's and OpenZeppelin's errors, and that turns a cryptic `0xb99e2ab7`
+into *"Insufficient payment: the contract required 10000000000000000 wei"*. Without
+the full ABI, you'd only see a hash. **The cost is trivial** (a slightly larger JSON
+file) and the DX improvement is huge. (The subtleties of *when* ethers decodes for
+you vs. when it hands you the raw selector are covered in
+[04 §2](./04-debugging-and-learnings.md).)
 
 ---
 
-## 5. Decisiones de stack y sus porqués
+## 5. Stack decisions and their whys
 
-### ethers v6 por CDN, sin bundler
-Cargamos ethers como build **UMD** desde un CDN:
+### ethers v6 via CDN, no bundler
+We load ethers as a **UMD** build from a CDN:
 
 ```html
 <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
 ```
 
-- **UMD** expone una variable global `ethers` (`window.ethers`), así que `app.js` la
-  usa directamente sin `import`.
-- **Por qué:** mantener el stack mínimo. Sin `npm`, sin `webpack`/`vite`, sin paso de
-  build. Editas un `.js`, recargas el navegador, listo. Para una pieza de aprendizaje
-  y un puente local, la simplicidad gana.
-- **Trade-off:** dependes de un CDN (necesitas red la primera vez; luego el navegador
-  cachea) y fijas la versión en la URL. En producción se suele *bundlear* y servir
-  ethers desde tu propio dominio, pero aquí no compensa la complejidad.
+- **UMD** exposes a global `ethers` variable (`window.ethers`), so `app.js` uses it
+  directly without `import`.
+- **Why:** keep the front-end stack minimal. No `npm`, no `webpack`/`vite`, no build
+  step for the page. You edit a `.js`, reload the browser, done. For a learning piece
+  and a local bridge, simplicity wins.
+- **Trade-off:** you depend on a CDN (you need network the first time; then the
+  browser caches) and you pin the version in the URL. In production you'd usually
+  *bundle* and serve ethers from your own domain, but here it's not worth the
+  complexity.
 
-### Servidor sin dependencias
-`server.js` usa **solo módulos integrados de Node** (`http`, `fs`, `path`).
+### Server: dependency-free reads, deliberate deps only for SIWE
+`server.js` resolves the on-chain **reads** using **only Node's built-in modules**
+(`http`, `fs`, `path`, `crypto`, `url`), encoding the `eth_call` arguments by hand
+(everything is `address`/`uint256`, so it's trivial).
 
-- **Por qué:** evita `npm install` y la carpeta `node_modules` por completo. Un
-  fichero, cero dependencias, cero superficie de mantenimiento o vulnerabilidades de
-  terceros. Su única tarea es devolver ficheros estáticos.
-- **Bonus en este entorno:** al solo *leer* ficheros, esquiva el problema de permisos
-  de WSL (carpetas creadas como `root` desde Windows) que sí afectaría a un
-  `npm install` corriendo como tu usuario de WSL.
-- **Trade-off:** no trae *live-reload* ni middlewares. Para esto no hacen falta.
+- **Why:** for reads, avoiding `npm install` keeps the surface tiny — one file, zero
+  third-party maintenance or vulnerability exposure.
+- **The exception:** the SIWE login (doc 06) adds `siwe` and `ethers`. Cryptographic
+  verification (ecrecover, strict EIP-4361 parsing) must **not** be homemade, so
+  there we lean on proven libraries — the reasoning is in [06 §6](./06-login-siwe.md).
+- **Bonus in this environment:** doing reads with built-ins sidesteps a WSL
+  permission issue (folders created as `root` from Windows) that could affect an
+  `npm install` running as your WSL user. The install is made **conditional** by the
+  Windows launcher (`start-bridge.ps1`), which only runs `npm install` when needed.
 
-### La dirección determinista del contrato
-`CONTRACT_ADDRESS` está fijada en `app.js`:
+### The contract's deterministic address
+`CONTRACT_ADDRESS` is fixed in `app.js` (and in `server.js`):
 
 ```js
 const CONTRACT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
 ```
 
-- **Por qué funciona:** la dirección de un contrato se deriva de `(dirección del
-  deployer, nonce)`. En una Anvil **recién arrancada**, la cuenta #0 tiene nonce 0,
-  así que su **primer** despliegue **siempre** cae en esa dirección. Es estable entre
-  reinicios *mientras* despliegues lo mismo en el mismo orden con la misma cuenta.
-- **Cuándo cambia:** si despliegas desde otra cuenta, o no es el primer despliegue
-  (nonce distinto). Entonces hay que actualizar la constante con la dirección que
-  imprime `forge script` (o leerla de `contracts/broadcast/.../run-latest.json`).
-- **Trade-off:** hardcodear es lo más simple para desarrollo local. En testnet/mainnet
-  la dirección se gestionaría por red (p. ej. un fichero de despliegues por chainId).
+- **Why it works:** a contract's address is derived from `(deployer address, nonce)`.
+  On a **freshly started** Anvil, account #0 has nonce 0, so its **first** deployment
+  **always** lands on that address. It's stable across restarts *as long as* you
+  deploy the same thing in the same order with the same account.
+- **When it changes:** if you deploy from another account, or it isn't the first
+  deployment (different nonce). Then you must update the constant with the address
+  `forge script` prints (or read it from
+  `contracts/broadcast/.../run-latest.json`).
+- **Trade-off:** hardcoding is the simplest thing for local development. On
+  testnet/mainnet the address would be managed per network (e.g. a deployments file
+  keyed by chainId).
 
 ---
 
-## 6. Nota de entorno: Node en Windows, Anvil en WSL
+## 6. Environment note: Node on Windows, Anvil on WSL
 
-⚠️ **Importante en este equipo**, porque las piezas viven en sistemas distintos:
+⚠️ **Important on this machine**, because the pieces live on different systems:
 
-- **Anvil y Foundry corren en WSL** (Ubuntu). Ahí se compila, testea y despliega el
-  contrato.
-- **Node está instalado en Windows**, no en WSL. Por eso el **servidor del puente se
-  arranca desde una terminal de Windows** (PowerShell), no desde WSL.
-- **MetaMask corre en el navegador de Windows.**
+- **Anvil and Foundry run on WSL** (Ubuntu). That's where the contract is compiled,
+  tested and deployed.
+- **Node is installed on Windows**, not on WSL. That's why the **bridge server is
+  started from a Windows terminal** (PowerShell), not from WSL.
+- **MetaMask runs in the Windows browser.**
 
-Funciona porque **`localhost` se comparte entre Windows y WSL**: un servicio que
-escucha en `127.0.0.1:PUERTO` en WSL es accesible desde Windows en `localhost:PUERTO`
-y viceversa. Así:
+It works because **`localhost` is shared between Windows and WSL**: a service
+listening on `127.0.0.1:PORT` in WSL is reachable from Windows at `localhost:PORT`
+and vice versa. So:
 
-| Pieza | Dónde escucha | Quién la consume |
-|-------|---------------|------------------|
-| Anvil (RPC) | WSL, `127.0.0.1:8545` | el navegador (Windows) y forge (WSL) |
-| Servidor del puente | Windows, `localhost:8787` | el navegador (Windows) |
+| Piece | Where it listens | Who consumes it |
+|-------|------------------|-----------------|
+| Anvil (RPC) | WSL, `127.0.0.1:8545` | the browser (Windows) and forge (WSL) |
+| Bridge server | Windows, `localhost:8787` | the browser (Windows) |
 
-**Qué terminal arranca cada cosa:**
+**Which terminal starts each thing:**
 
-| Terminal | Dónde | Comando |
+| Terminal | Where | Command |
 |----------|-------|---------|
-| A | WSL | `anvil` |
+| A | WSL | `anvil` (or `scripts/start-local.sh`) |
 | B | WSL | `forge script … --broadcast` (deploy) |
-| C | **Windows (PowerShell)** | `node server.js` en la carpeta `bridge` |
+| C | **Windows (PowerShell)** | `node server.js` in the `bridge` folder |
 
-Para arrancar el servidor desde PowerShell, la ruta de la carpeta es la UNC del
-sistema de ficheros de WSL:
+To start the server from PowerShell, the folder path is the UNC path of the WSL
+filesystem:
 
 ```powershell
 cd \\wsl.localhost\Ubuntu\home\manumendez\projects\bridge
 node server.js
-# si cd a UNC da problemas:  node \\wsl.localhost\Ubuntu\home\manumendez\projects\bridge\server.js
+# if cd to UNC gives trouble:  node \\wsl.localhost\Ubuntu\home\manumendez\projects\bridge\server.js
 ```
 
-> El navegador y MetaMask también hablan con Anvil por `localhost` (lecturas y envío
-> de transacciones firmadas). Como Anvil habilita **CORS** (`Access-Control-Allow-Origin: *`),
-> el navegador puede llamar a su RPC sin bloqueos.
+> The browser and MetaMask also talk to Anvil over `localhost` (reads and sending
+> signed transactions). Since Anvil enables **CORS**
+> (`Access-Control-Allow-Origin: *`), the browser can call its RPC without blocks.
 
 ---
 
-## 7. Rutina de arranque del entorno local completo
+## 7. Startup routine for the full local environment
 
-De cero, en orden:
+From scratch, in order. The project ships two helper scripts that automate this;
+they're worth using instead of the raw commands.
 
-1. **Arrancar Anvil** (Terminal A, WSL):
+1. **Start Anvil + deploy** (Terminal A, WSL):
    ```bash
-   anvil
+   bash scripts/start-local.sh
    ```
-   Deja la terminal abierta. Imprime 10 cuentas de prueba (claves **públicas**, solo
-   desarrollo).
+   This starts Anvil **with state persistence** on disk (`.anvil/state.json`, so your
+   inventory survives restarts), waits for the RPC, and **decides whether to deploy**
+   based on the contract version it finds. It prints the deployed address (should be
+   the usual deterministic one) and leaves Anvil running. The version-detection logic
+   (and why persistence needs it) is explained in
+   [04 — Debugging and learnings](./04-debugging-and-learnings.md).
 
-2. **Desplegar el contrato + catálogo** (Terminal B, WSL):
-   ```bash
-   cd contracts
-   forge script script/DeployGameStore.s.sol:DeployGameStore \
-     --rpc-url http://127.0.0.1:8545 \
-     --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
-     --broadcast
-   ```
-   Anota la dirección desplegada (debería ser la determinista de siempre).
+   > The raw equivalent, if you prefer to run it by hand, is `anvil` in one terminal
+   > and the `forge script … --broadcast` deploy (see doc 01 §7) in another.
 
-3. **Arrancar el servidor del puente** (Terminal C, **PowerShell de Windows**):
+2. **Start the bridge server** (Terminal C, **Windows PowerShell**):
    ```powershell
-   cd \\wsl.localhost\Ubuntu\home\manumendez\projects\bridge
-   node server.js
+   \\wsl.localhost\Ubuntu\home\manumendez\projects\bridge\start-bridge.ps1
    ```
+   This runs `npm install` **only when needed** (first run, or `package.json`
+   changed) and then `node server.js`.
 
-4. **Abrir la web**: `http://localhost:8787`. Conecta MetaMask (red Anvil, chain id
-   31337) y usa la tienda.
+3. **Open the web**: `http://localhost:8787`. Connect MetaMask (Anvil network, chain
+   id 31337) and use the store.
 
-### ⚠️ Reiniciar Anvil obliga a redeployar
+### ⚠️ Restarting Anvil and the persistent state
 
-Anvil guarda su estado **en memoria**: al pararlo y volverlo a arrancar, la cadena
-**empieza de cero**. El contrato que habías desplegado **ya no existe**. Síntomas en
-la web: las lecturas devuelven 0 / "no disponible" o fallan. **Solución:** vuelve a
-ejecutar el paso 2 (deploy). Como la cuenta #0 vuelve a estar a nonce 0, el contrato
-recae en la **misma dirección determinista**, así que normalmente **no** hace falta
-tocar `CONTRACT_ADDRESS` en `app.js`.
+With `start-local.sh`, Anvil's state is **persisted to disk**, so restarting no
+longer wipes your contract by default — the script reloads the previous state. But
+that persistence brings its own risk: the saved state can hold an **old version** of
+the contract. The script guards against this by probing a getter that only exists in
+the current version and, if it's stale, redeploying on a clean chain. The full story
+(the "phantom contract" bug) is in [04 §1](./04-debugging-and-learnings.md).
 
-### ⚠️ Error "nonce too high" en MetaMask → *Clear activity*
+> If you run Anvil **by hand** (`anvil`, no `--state`), it keeps its state **in
+> memory**: restarting starts the chain from scratch and your deployed contract is
+> gone. Symptoms in the web: reads return 0 / "not available" or fail. **Fix:** run
+> the deploy again. Since account #0 is back at nonce 0, the contract lands on the
+> **same deterministic address**, so you usually **don't** need to touch
+> `CONTRACT_ADDRESS` in `app.js`.
 
-Tras reiniciar Anvil verás a menudo un error al firmar del tipo **"nonce too high"**
-(o transacciones que se quedan colgadas).
+### ⚠️ "nonce too high" error in MetaMask → *Clear activity*
 
-- **Por qué pasa:** MetaMask **cachea el nonce** de tu cuenta por red. Si antes de
-  reiniciar habías hecho, p. ej., 5 transacciones, MetaMask cree que tu próximo nonce
-  es 5. Pero al reiniciar Anvil, la cadena cree que tu cuenta está a nonce 0. MetaMask
-  envía con nonce 5 y la cadena lo rechaza por "demasiado alto".
-- **El fix:** en MetaMask, **Configuración → Avanzado → "Borrar datos de actividad y
-  nonce"** (*Clear activity tab data*) con la cuenta y la red Anvil seleccionadas.
-  Esto resetea el contador de nonce de MetaMask para esa red, sin tocar tus fondos ni
-  tu clave. Tras hacerlo, las transacciones vuelven a firmarse con el nonce correcto.
-- **Regla práctica:** cada vez que reinicies Anvil → **redeploy** + **Clear activity**
-  en MetaMask. Son los dos pasos que evitan el 90% de los problemas de desarrollo local.
+After restarting Anvil you'll often see a signing error like **"nonce too high"** (or
+transactions that hang).
+
+- **Why it happens:** MetaMask **caches the nonce** of your account per network. If
+  before restarting you had made, say, 5 transactions, MetaMask thinks your next
+  nonce is 5. But when Anvil restarts (from a clean chain), the chain thinks your
+  account is at nonce 0. MetaMask sends with nonce 5 and the chain rejects it as "too
+  high".
+- **The fix:** in MetaMask, **Settings → Advanced → "Clear activity tab data"** with
+  the Anvil account and network selected. This resets MetaMask's nonce counter for
+  that network, without touching your funds or your key. After that, transactions
+  sign with the correct nonce again.
+- **Rule of thumb:** whenever the chain restarts clean → **redeploy** + **Clear
+  activity** in MetaMask. These two steps avoid 90% of local-development problems.
 
 ---
 
-## Estado de esta fase
+## Status of this phase
 
-✅ Servidor estático sin dependencias sirviendo la web.
-✅ Conexión con MetaMask (`BrowserProvider` + `eth_requestAccounts` + `getSigner`).
-✅ Lectura de tienda (`priceOf`/`isListed`) e inventario (`balanceOf`).
-✅ Compra (`buy` payable con `value`) y vaciado (`burn`), firmando en MetaMask.
-✅ Manejo de errores legible apoyado en el ABI completo (custom errors).
-✅ Verificado de punta a punta en el navegador.
+✅ Node server serving the web (and, later, the JSON API — docs 05/06).
+✅ MetaMask connection (`BrowserProvider` + `eth_requestAccounts` + `getSigner`).
+✅ Store reads (`priceOf`/`isListed`), inventory (`balanceOf`) and progress/medallions.
+✅ Purchase (`buy` payable with `value`) and empty (`burn`), signing in MetaMask.
+✅ Readable error handling backed by the full ABI (custom errors).
+✅ Verified end to end in the browser.
 
-**Siguiente pieza:** la integración con **Unreal Engine** (`/unreal`), que pedirá
-acciones al puente en lugar de operar tú a mano desde el navegador.
+**Next pieces:** the **HTTP API** the game consumes
+([05](./05-api-and-unreal-client.md)) and the **SIWE login**
+([06](./06-login-siwe.md)), which let Unreal drive purchases and authenticate
+instead of you operating by hand in the browser.

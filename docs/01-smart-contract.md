@@ -1,110 +1,119 @@
-# 01 — El smart contract: `GameStore` (ERC-1155)
+# 01 — The smart contract: `GameStore` (ERC-1155)
 
-> Parte de la guía de aprendizaje del proyecto. Este documento explica **por qué**
-> está construido así el contrato, no solo qué hace. Si vienes de leer el código,
-> aquí encontrarás el razonamiento detrás de cada decisión.
+> Part of the project's learning guide. This document explains **why** the
+> contract is built the way it is, not just what it does. If you're coming from
+> reading the code, here you'll find the reasoning behind each decision.
 
 ---
 
-## 1. Qué hace el contrato y su papel en la arquitectura
+## 1. What the contract does and its role in the architecture
 
-`GameStore` es la **tienda de items del juego, vivida on-chain**. Cada item (una
-espada, un escudo, una poción…) es un *token* ERC-1155, y el balance de ese token
-para una dirección representa cuántas unidades posee ese jugador.
+`GameStore` is the **in-game item store, lived on-chain**. Each item (a sword, a
+shield, a potion…) is an ERC-1155 *token*, and the balance of that token for an
+address represents how many units that player owns.
 
-El contrato hace cuatro cosas:
+The contract does four things:
 
-1. **Mantiene un catálogo** de items con su precio (lo gestiona el *owner*).
-2. **Vende** items: el jugador paga ETH y recibe los tokens (`buy`).
-3. **Permite quemar** items para vaciar inventario (`burn`).
-4. **Permite al owner retirar** lo recaudado (`withdraw`).
+1. **Keeps a catalog** of items with their price (managed by the *owner*).
+2. **Sells** items: the player pays ETH and receives the tokens (`buy`).
+3. **Allows burning** items to empty inventory (`burn`).
+4. **Lets the owner withdraw** the proceeds (`withdraw`).
 
-### Su papel en la arquitectura global
+On top of that base, `buy` also enforces **dependency rules** and mints
+**achievements** — both covered in depth in
+[03 — Achievements and dependencies](./03-achievements-and-dependencies.md).
 
-El contrato es la **fuente de verdad de la propiedad de items**. No confía en el
-cliente del juego: la verdad de "cuántas espadas tengo" vive en la blockchain, no
-en la memoria del juego (que podría manipularse). El flujo completo es:
+### Its role in the global architecture
+
+The contract is the **source of truth for item ownership**. It doesn't trust the
+game client: the truth of "how many swords I have" lives on the blockchain, not in
+the game's memory (which could be tampered with). The full flow is:
 
 ```
-Juego (Unreal)  →  Puente web local (Node + ethers.js)  →  MetaMask  →  GameStore (on-chain)
+Game (Unreal)  →  Local web bridge (Node + ethers.js)  →  MetaMask  →  GameStore (on-chain)
 ```
 
-El juego nunca habla directamente con la cadena ni maneja claves: delega en el
-puente, que usa MetaMask para que el jugador **firme** las transacciones de compra
-contra `GameStore`. Este documento cubre solo la última pieza, el contrato.
+The game never talks to the chain directly nor handles keys: it delegates to the
+bridge, which uses MetaMask so the player **signs** the purchase transactions
+against `GameStore`. This document covers only the last piece, the contract.
 
 ---
 
-## 2. Por qué ERC-1155 (y no ERC-721) para un inventario
+## 2. Why ERC-1155 (and not ERC-721) for an inventory
 
-Las tres normas de tokens más comunes:
+The three most common token standards:
 
-| Estándar | Modelo | Ejemplo típico |
-|----------|--------|----------------|
-| **ERC-20** | Un solo tipo de token, fungible | Una moneda / divisa |
-| **ERC-721** | Cada token es **único** (NFT), 1 contrato por colección | Arte coleccionable único |
-| **ERC-1155** | **Múltiples tipos** de token en un contrato; cada tipo puede tener muchas unidades | Inventarios de juego |
+| Standard | Model | Typical example |
+|----------|-------|-----------------|
+| **ERC-20** | A single token type, fungible | A coin / currency |
+| **ERC-721** | Each token is **unique** (NFT), 1 contract per collection | Unique collectible art |
+| **ERC-1155** | **Multiple token types** in one contract; each type can have many units | Game inventories |
 
-Para un inventario de juego, ERC-1155 encaja mucho mejor que ERC-721:
+For a game inventory, ERC-1155 fits much better than ERC-721:
 
-- **Un inventario es "semi-fungible".** Da igual *qué* poción concreta tienes; lo que
-  importa es que tienes *5 pociones*. Eso es un balance (`itemId → cantidad`), no 5
-  NFTs únicos. ERC-1155 modela exactamente eso; ERC-721 te obligaría a acuñar un NFT
-  distinto por cada unidad.
-- **Un solo contrato para todo el catálogo.** Con ERC-721 normalmente despliegas un
-  contrato por colección. Con ERC-1155, todos los items (espadas, escudos, pociones,
-  y los que añadas mañana) viven en **un contrato**, identificados por `itemId`. Menos
-  despliegues, menos direcciones que gestionar.
-- **Más barato en gas.** Acuñar 100 pociones en ERC-1155 es incrementar un balance;
-  en ERC-721 serían 100 NFTs con 100 entradas de propiedad. ERC-1155 además soporta
-  operaciones **por lotes** (`balanceOfBatch`, `safeBatchTransferFrom`), ideal para
-  mover varios items de golpe.
+- **An inventory is "semi-fungible".** It doesn't matter *which* specific potion you
+  have; what matters is that you have *5 potions*. That's a balance
+  (`itemId → quantity`), not 5 unique NFTs. ERC-1155 models exactly that; ERC-721
+  would force you to mint a distinct NFT per unit.
+- **A single contract for the whole catalog.** With ERC-721 you usually deploy one
+  contract per collection. With ERC-1155, all items (swords, shields, potions, and
+  whatever you add tomorrow) live in **one contract**, identified by `itemId`. Fewer
+  deployments, fewer addresses to manage.
+- **Cheaper on gas.** Minting 100 potions in ERC-1155 is incrementing a balance; in
+  ERC-721 it would be 100 NFTs with 100 ownership entries. ERC-1155 also supports
+  **batch** operations (`balanceOfBatch`, `safeBatchTransferFrom`), ideal for moving
+  several items at once.
 
-**Cuándo SÍ querrías ERC-721:** si cada item fuera realmente único e irrepetible
-(p. ej. "la Espada Legendaria nº 1 con su historia propia"). Para una tienda con
-stock repetible, ERC-1155 es la elección natural.
+**When you WOULD want ERC-721:** if each item were truly unique and irreplaceable
+(e.g. "the Legendary Sword #1 with its own history"). For a store with repeatable
+stock, ERC-1155 is the natural choice.
 
 ---
 
-## 3. Por qué heredamos de cada contrato de OpenZeppelin
+## 3. Why we inherit from each OpenZeppelin contract
 
-[OpenZeppelin](https://docs.openzeppelin.com/contracts/5.x/) son implementaciones de
-referencia, auditadas y mantenidas. **No reinventamos los estándares**: heredamos de
-código probado y solo añadimos nuestra lógica de tienda encima.
+[OpenZeppelin](https://docs.openzeppelin.com/contracts/5.x/) are reference
+implementations, audited and maintained. **We don't reinvent the standards**: we
+inherit from proven code and only add our store logic on top.
 
 ```solidity
-contract GameStore is ERC1155, ERC1155Burnable, Ownable { ... }
+contract GameStore is ERC1155, ERC1155Burnable, Ownable, ReentrancyGuard { ... }
 ```
 
-### `ERC1155` — el estándar multi-token
-Aporta toda la maquinaria del estándar: los balances (`balanceOf`,
-`balanceOfBatch`), las transferencias seguras, las aprobaciones de operador
-(`setApprovalForAll`), los hooks internos (`_mint`, `_burn`, `_update`) y el soporte
-de metadatos (`uri`). Sobre esta base, nosotros solo escribimos la lógica de
-compra/catálogo. Su constructor pide una `uri` de metadatos.
+### `ERC1155` — the multi-token standard
+Provides all the standard machinery: balances (`balanceOf`, `balanceOfBatch`), safe
+transfers, operator approvals (`setApprovalForAll`), internal hooks (`_mint`,
+`_burn`, `_update`) and metadata support (`uri`). On this base, we only write the
+purchase/catalog logic. Its constructor takes a metadata `uri`.
 
-### `ERC1155Burnable` — quemar tokens
-Extensión que añade `burn(account, id, amount)` y `burnBatch(...)`. La heredamos para
-cumplir el requisito de "vaciar inventario" **sin escribir lógica de quema propia**.
-Aporta algo crítico de seguridad: **ya trae el control de permisos**. Solo el dueño de
-los tokens (o un operador que haya aprobado) puede quemarlos; si otro lo intenta,
-revierte con `ERC1155MissingApprovalForAll`. Por eso no tuvimos que añadir ninguna
-comprobación: la extensión la hace por nosotros (y lo verifica un test).
+### `ERC1155Burnable` — burning tokens
+Extension that adds `burn(account, id, amount)` and `burnBatch(...)`. We inherit it
+to satisfy the "empty inventory" requirement **without writing our own burn logic**.
+It brings something critical for security: **it already includes permission
+control**. Only the owner of the tokens (or an approved operator) can burn them; if
+someone else tries, it reverts with `ERC1155MissingApprovalForAll`. That's why we
+didn't have to add any check: the extension does it for us (and a test verifies it).
 
-### `Ownable` — control de acceso
-Da el concepto de "dueño del contrato" y el modificador `onlyOwner`. Lo usamos para
-proteger las funciones administrativas: `setItem` (gestionar el catálogo) y
-`withdraw` (retirar fondos). En OpenZeppelin **v5** el constructor exige el owner
-inicial de forma explícita: `Ownable(msg.sender)` hace que quien despliega sea el
-owner. (En v4 era implícito; este es un cambio importante entre versiones.)
+### `Ownable` — access control
+Gives the "contract owner" concept and the `onlyOwner` modifier. We use it to
+protect the administrative functions: `setItem` (manage the catalog) and `withdraw`
+(withdraw funds). In OpenZeppelin **v5** the constructor requires the initial owner
+explicitly: `Ownable(msg.sender)` makes the deployer the owner. (In v4 it was
+implicit; this is an important change between versions.)
 
-> **Idea clave:** cada contrato base resuelve **una responsabilidad**
-> (tokens / quema / permisos) y las componemos por herencia. Esto es composición de
-> contratos, el patrón habitual en Solidity.
+### `ReentrancyGuard` — the reentrancy lock
+Provides the `nonReentrant` modifier, which prevents a function from being
+re-entered before it finishes. We apply it to `buy`, because `buy` makes external
+ETH calls (the excess refund and, indirectly, the achievements mint). See
+[03 §1.1](./03-achievements-and-dependencies.md) for the full reentrancy discussion.
+
+> **Key idea:** each base contract solves **one responsibility**
+> (tokens / burning / permissions / reentrancy) and we compose them by inheritance.
+> This is contract composition, the usual pattern in Solidity.
 
 ---
 
-## 4. Explicación función por función
+## 4. Function-by-function walkthrough
 
 ### `setItem(uint256 itemId, uint256 price)` — *onlyOwner*
 
@@ -116,44 +125,63 @@ function setItem(uint256 itemId, uint256 price) external onlyOwner {
 }
 ```
 
-Da de alta un item nuevo o **actualiza** el precio de uno existente. Marca
-`isListed[itemId] = true` para registrar que el item existe en el catálogo. Solo el
-owner puede llamarla (`onlyOwner`). Emite `ItemListed` para que clientes externos
-(el puente, un indexador) puedan reaccionar.
+Registers a new item or **updates** the price of an existing one. It marks
+`isListed[itemId] = true` to record that the item exists in the catalog. Only the
+owner can call it (`onlyOwner`). It emits `ItemListed` so external clients (the
+bridge, an indexer) can react.
 
-### `buy(uint256 itemId, uint256 quantity)` — *payable*
+### `buy(uint256 itemId, uint256 quantity)` — *payable, nonReentrant*
 
 ```solidity
-function buy(uint256 itemId, uint256 quantity) external payable {
+function buy(uint256 itemId, uint256 quantity) external payable nonReentrant {
+    // 1) CHECKS
     if (!isListed[itemId]) revert ItemNotListed(itemId);
     if (quantity == 0) revert InvalidQuantity();
-
     uint256 cost = priceOf[itemId] * quantity;
     if (msg.value < cost) revert InsufficientPayment(cost, msg.value);
+    _checkDependencies(itemId);
 
+    // 2) EFFECTS
     _mint(msg.sender, itemId, quantity, "");
+    purchasedTotal[msg.sender][itemId] += quantity;
+    totalSpent[msg.sender] += cost;
     emit ItemPurchased(msg.sender, itemId, quantity, msg.value);
+
+    // 3) INTERACTIONS (external calls, always last)
+    _checkAchievements(msg.sender);            // mint achievements if milestones met
+    uint256 excess = msg.value - cost;
+    if (excess > 0) {                          // refund the change
+        (bool ok,) = payable(msg.sender).call{value: excess}("");
+        if (!ok) revert RefundFailed();
+        emit ExcessRefunded(msg.sender, excess);
+    }
 }
 ```
 
-El corazón de la tienda. Es `payable` porque **recibe ETH**. Valida en orden:
+The heart of the store. It's `payable` because it **receives ETH**. It validates in
+order:
 
-1. **Que el item exista** (`isListed`) → si no, `ItemNotListed`.
-2. **Que la cantidad sea > 0** → si no, `InvalidQuantity` (evita compras vacías).
-3. **Que el pago cubra el coste** (`msg.value >= precio * cantidad`) → si no,
+1. **That the item exists** (`isListed`) → if not, `ItemNotListed`.
+2. **That the quantity is > 0** → if not, `InvalidQuantity` (avoids empty purchases).
+3. **That the payment covers the cost** (`msg.value >= price * quantity`) → if not,
    `InsufficientPayment(required, sent)`.
+4. **That the dependency rules hold** (`_checkDependencies`) — e.g. you need a bow +
+   a quiver to buy arrows. These are covered in
+   [03](./03-achievements-and-dependencies.md).
 
-Si todo pasa, **acuña** (`_mint`) `quantity` unidades del `itemId` al comprador
-(`msg.sender`) y emite `ItemPurchased`. Las validaciones van **antes** del `_mint`:
-en Solidity esto sigue el patrón *checks-effects-interactions* — comprueba primero,
-modifica estado después.
+If everything passes, it **mints** (`_mint`) `quantity` units of the `itemId` to the
+buyer (`msg.sender`), updates the accumulated counters (`purchasedTotal`,
+`totalSpent`), mints any earned achievements, and **refunds the excess** if the
+player overpaid. The structure follows the *checks-effects-interactions* pattern:
+validate first, change state next, external calls last. The **why** of that ordering
+(and of `nonReentrant`) is the refund/reentrancy discussion in
+[03 §1.1](./03-achievements-and-dependencies.md).
 
-### `burn(address account, uint256 id, uint256 value)` — *heredada*
+### `burn(address account, uint256 id, uint256 value)` — *inherited*
 
-No la escribimos nosotros: viene de `ERC1155Burnable`. El jugador la llama con su
-propia dirección para vaciar inventario: `burn(miDireccion, itemId, cantidad)`. La
-extensión garantiza que solo el dueño de los tokens (o un operador aprobado) pueda
-quemarlos.
+We didn't write it: it comes from `ERC1155Burnable`. The player calls it with their
+own address to empty inventory: `burn(myAddress, itemId, quantity)`. The extension
+guarantees only the token owner (or an approved operator) can burn them.
 
 ### `withdraw()` — *onlyOwner*
 
@@ -169,33 +197,33 @@ function withdraw() external onlyOwner {
 }
 ```
 
-Envía **todo** el ETH recaudado al owner. Revierte con `NoFundsToWithdraw` si no hay
-saldo, y con `WithdrawFailed` si la transferencia falla. El porqué del `call` se
-explica en la sección de trade-offs.
+Sends **all** the collected ETH to the owner. Reverts with `NoFundsToWithdraw` if
+there's no balance, and with `WithdrawFailed` if the transfer fails. The reason for
+the `call` is explained in the trade-offs section.
 
 ---
 
-## 5. Decisiones de diseño y sus trade-offs
+## 5. Design decisions and their trade-offs
 
-### 5.1 `isListed` separado del precio
+### 5.1 `isListed` separate from the price
 
-Usamos **dos** mappings: `priceOf[itemId]` y `isListed[itemId]`.
+We use **two** mappings: `priceOf[itemId]` and `isListed[itemId]`.
 
 ```solidity
 mapping(uint256 => uint256) public priceOf;
 mapping(uint256 => bool)    public isListed;
 ```
 
-La alternativa tentadora sería "si el precio es 0, el item no existe". Pero eso
-**confunde dos conceptos distintos**: "item gratuito" e "item inexistente". Con un
-flag de existencia separado podemos listar items con precio 0 (promociones, items
-gratis) sin ambigüedad, y la comprobación "el item existe" es explícita y legible.
+The tempting alternative would be "if the price is 0, the item doesn't exist". But
+that **conflates two distinct concepts**: "free item" and "nonexistent item". With a
+separate existence flag we can list items with price 0 (promotions, free items)
+without ambiguity, and the "item exists" check is explicit and readable.
 
-- **Trade-off:** un mapping extra cuesta algo más de gas en `setItem` (un `SSTORE`
-  adicional). A cambio ganamos claridad y un modelo de datos correcto. Para una
-  tienda, merece la pena.
+- **Trade-off:** an extra mapping costs slightly more gas in `setItem` (an
+  additional `SSTORE`). In exchange we gain clarity and a correct data model. For a
+  store, it's worth it.
 
-### 5.2 Custom errors en lugar de `require(string)`
+### 5.2 Custom errors instead of `require(string)`
 
 ```solidity
 error InsufficientPayment(uint256 required, uint256 sent);
@@ -203,117 +231,122 @@ error InsufficientPayment(uint256 required, uint256 sent);
 if (msg.value < cost) revert InsufficientPayment(cost, msg.value);
 ```
 
-Desde Solidity 0.8.4 existen los *custom errors*. Frente al clásico
-`require(cond, "mensaje")`:
+Since Solidity 0.8.4 there are *custom errors*. Compared to the classic
+`require(cond, "message")`:
 
-- **Más baratos en gas**: un error se identifica por un selector de 4 bytes, no por
-  una cadena de texto almacenada en el bytecode.
-- **Llevan datos**: `InsufficientPayment(required, sent)` te dice cuánto hacía falta
-  y cuánto se envió. Eso es oro para depurar y para que la UI del juego muestre un
-  mensaje útil.
-- **Trade-off:** son algo menos "auto-explicativos" si solo miras el hash del error
-  en un explorador sin el ABI. Con el ABI (que sí tenemos), se decodifican perfecto.
+- **Cheaper on gas**: an error is identified by a 4-byte selector, not by a text
+  string stored in the bytecode.
+- **They carry data**: `InsufficientPayment(required, sent)` tells you how much was
+  needed and how much was sent. That's gold for debugging and for the game UI to
+  show a useful message.
+- **Trade-off:** they're a bit less "self-explanatory" if you only look at the error
+  hash in an explorer without the ABI. With the ABI (which we do have), they decode
+  perfectly.
 
-### 5.3 Patrón `call` en `withdraw`
+### 5.3 The `call` pattern in `withdraw`
 
 ```solidity
 (bool ok,) = payable(owner()).call{value: balance}("");
 if (!ok) revert WithdrawFailed();
 ```
 
-Hay tres formas de enviar ETH: `transfer`, `send` y `call`. Históricamente se usaba
-`transfer`, pero **reenvía solo 2300 de gas**. Si el owner fuera un contrato (p. ej.
-un multisig como Gnosis Safe), su función de recepción necesita más gas y `transfer`
-fallaría. La recomendación actual es usar **`call`**, que reenvía todo el gas
-disponible, y **comprobar el booleano de retorno** (lo hacemos: si `!ok`, revertimos).
+There are three ways to send ETH: `transfer`, `send` and `call`. Historically
+`transfer` was used, but it **forwards only 2300 gas**. If the owner were a contract
+(e.g. a multisig like Gnosis Safe), its receive function needs more gas and
+`transfer` would fail. The current recommendation is to use **`call`**, which
+forwards all available gas, and **check the returned boolean** (we do: if `!ok`, we
+revert).
 
-- **Trade-off / cuidado:** `call` abre la puerta a *reentrancy* (el receptor podría
-  re-entrar). Aquí es seguro porque `withdraw` no depende de estado mutable tras la
-  llamada y está protegida por `onlyOwner`. En funciones más complejas se añadiría un
-  `nonReentrant` (de `ReentrancyGuard`).
+- **Trade-off / caution:** `call` opens the door to *reentrancy* (the recipient
+  could re-enter). Here it's safe because `withdraw` doesn't depend on mutable state
+  after the call and is protected by `onlyOwner`. In more complex functions we add a
+  `nonReentrant` guard (from `ReentrancyGuard`) — which is exactly what `buy` does,
+  since it also sends ETH (the refund).
 
-### 5.4 El exceso de pago NO se reembolsa — ⚠️ MEJORA PENDIENTE
+### 5.4 The overpayment IS refunded (checks-effects-interactions)
 
 ```solidity
 if (msg.value < cost) revert InsufficientPayment(cost, msg.value);
-_mint(...);  // si msg.value > cost, el exceso se queda en el contrato
+_mint(...);
+...
+uint256 excess = msg.value - cost;
+if (excess > 0) {
+    (bool ok,) = payable(msg.sender).call{value: excess}("");
+    if (!ok) revert RefundFailed();
+    emit ExcessRefunded(msg.sender, excess);
+}
 ```
 
-Aceptamos `msg.value >= cost`. Si el jugador paga **de más**, el exceso **se queda en
-el contrato** (el owner lo retira luego). Lo hicimos así por simplicidad y porque el
-requisito solo pedía "pago suficiente".
+We accept `msg.value >= cost`. If the player **overpays**, the excess is **refunded**
+at the end of `buy`. The refund is placed **after** the mint and all state changes
+(checks-effects-interactions), and `buy` is marked `nonReentrant`, so the external
+`call` cannot be exploited via reentrancy.
 
-- **Trade-off:** mala UX y un pequeño footgun — un jugador que pague de más pierde la
-  diferencia.
-- **MEJORA PENDIENTE:** reembolsar el excedente al final de `buy`:
-  ```solidity
-  uint256 excess = msg.value - cost;
-  if (excess > 0) {
-      (bool ok,) = payable(msg.sender).call{value: excess}("");
-      if (!ok) revert RefundFailed();
-  }
-  ```
-  Implica usar de nuevo el patrón `call` y vigilar reentrancy (haz el `_mint` y los
-  cambios de estado **antes** del reembolso — checks-effects-interactions).
+> Earlier versions of this doc listed the refund as a *pending improvement* — it is
+> now implemented. The deeper security reasoning (why the refund goes last, CEI +
+> `nonReentrant` as a "double belt") lives in
+> [03 §1.1](./03-achievements-and-dependencies.md).
 
-### 5.5 Vendorización de `lib/` (sin submódulos git)
+### 5.5 Vendoring `lib/` (no git submodules)
 
-Instalamos OpenZeppelin con `forge install --no-git`, que **copia** los ficheros
-dentro de `lib/` y los versiona como código normal, en vez de usar *submódulos* git.
+We install OpenZeppelin with `forge install --no-git`, which **copies** the files
+into `lib/` and versions them as normal code, instead of using git *submodules*.
 
-- **Por qué:** el contrato vive dentro de un **monorepo** que ya tiene su propio
-  `.git` en la raíz. Usar submódulos crearía submódulos git **anidados**, que son
-  confusos de clonar y mantener.
-- **Ventaja:** el repo es **autocontenido** y reproducible — quien lo clona tiene
-  exactamente la versión de OZ que compila, sin pasos extra (`git submodule update`).
-- **Trade-off:** `lib/` añade muchos ficheros al control de versiones (en nuestro caso
-  ~780). El repo pesa más y los diffs de actualización de dependencias son grandes.
-  Para un proyecto de aprendizaje, la simplicidad compensa.
+- **Why:** the contract lives inside a **monorepo** that already has its own `.git`
+  at the root. Using submodules would create **nested** git submodules, which are
+  confusing to clone and maintain.
+- **Advantage:** the repo is **self-contained** and reproducible — whoever clones it
+  has exactly the OZ version that compiles, with no extra steps (`git submodule
+  update`).
+- **Trade-off:** `lib/` adds many files to version control (in our case ~780). The
+  repo is heavier and dependency-update diffs are large. For a learning project, the
+  simplicity is worth it.
 
 ---
 
-## 6. Conceptos clave de Solidity que aparecen
+## 6. Key Solidity concepts that appear
 
-- **wei / ether.** El ETH se mide internamente en **wei**; `1 ether = 1e18 wei`.
-  Solidity tiene el sufijo `ether` (`0.01 ether` = `10_000_000_000_000_000` wei),
-  que evita errores al contar ceros. **Todos los precios y pagos se hacen en wei.**
-- **`payable`.** Marca una función (o dirección) capaz de **recibir ETH**. `buy` es
-  `payable`; sin esa palabra, enviar ETH en la llamada revertiría. Para enviar ETH a
-  una dirección con `.call{value:...}` esa dirección debe ser `payable`.
-- **`msg.value`.** El ETH (en wei) **enviado junto con la llamada**. En `buy` lo
-  comparamos con `cost` para validar el pago.
-- **`msg.sender`.** **Quién** hace la llamada actual. Es el comprador en `buy`
-  (recibe los tokens), y en el constructor es quien despliega (se vuelve owner vía
+- **wei / ether.** ETH is measured internally in **wei**; `1 ether = 1e18 wei`.
+  Solidity has the `ether` suffix (`0.01 ether` = `10_000_000_000_000_000` wei),
+  which avoids errors counting zeros. **All prices and payments are in wei.**
+- **`payable`.** Marks a function (or address) able to **receive ETH**. `buy` is
+  `payable`; without that word, sending ETH in the call would revert. To send ETH to
+  an address with `.call{value:...}` that address must be `payable`.
+- **`msg.value`.** The ETH (in wei) **sent along with the call**. In `buy` we compare
+  it against `cost` to validate the payment.
+- **`msg.sender`.** **Who** makes the current call. It's the buyer in `buy` (receives
+  the tokens), and in the constructor it's the deployer (becomes owner via
   `Ownable(msg.sender)`).
-- **mint / `_mint`.** "Acuñar" = **crear** tokens nuevos y asignarlos a una
-  dirección. `_mint(to, id, amount, data)` incrementa el balance del comprador. Es
-  interno (`_`) porque solo nuestra lógica de `buy` debe poder acuñar, nunca alguien
-  desde fuera.
-- **Cheatcodes `vm.*` (en el script y los tests).** `vm` es un objeto especial de
-  Foundry con "trucos" para entornos de prueba/scripting:
-  - `vm.startBroadcast()` / `vm.stopBroadcast()` — delimitan las operaciones que se
-    convierten en **transacciones reales** firmadas y enviadas a la red.
-  - (En los tests) `vm.prank(addr)` — hace que la **siguiente** llamada parezca venir
-    de `addr` (para simular distintos usuarios); `vm.deal(addr, x)` — da saldo;
-    `vm.expectRevert(...)` — afirma que la llamada debe revertir con cierto error.
+- **mint / `_mint`.** "Minting" = **creating** new tokens and assigning them to an
+  address. `_mint(to, id, amount, data)` increments the buyer's balance. It's
+  internal (`_`) because only our `buy` logic should be able to mint, never someone
+  from outside.
+- **`vm.*` cheatcodes (in the script and tests).** `vm` is a special Foundry object
+  with "tricks" for test/scripting environments:
+  - `vm.startBroadcast()` / `vm.stopBroadcast()` — delimit the operations that become
+    **real transactions** signed and sent to the network.
+  - (In tests) `vm.prank(addr)` — makes the **next** call appear to come from `addr`
+    (to simulate different users); `vm.deal(addr, x)` — gives balance;
+    `vm.expectRevert(...)` — asserts the call must revert with a certain error.
 
 ---
 
-## 7. Flujo de despliegue local con Anvil
+## 7. Local deployment flow with Anvil
 
-**Anvil** es el nodo Ethereum local de Foundry (chain id **31337**), pensado para
-desarrollo. Despliega y verifica el contrato en tu máquina sin tocar ninguna red real.
+**Anvil** is Foundry's local Ethereum node (chain id **31337**), meant for
+development. It deploys and verifies the contract on your machine without touching
+any real network.
 
-### Arrancar el nodo (terminal A)
+### Start the node (terminal A)
 
 ```bash
 anvil
 ```
 
-Imprime 10 cuentas de prueba con 10000 ETH cada una y escucha en
-`http://127.0.0.1:8545`. Déjalo abierto.
+Prints 10 test accounts with 10000 ETH each and listens on
+`http://127.0.0.1:8545`. Leave it open.
 
-### Desplegar (terminal B)
+### Deploy (terminal B)
 
 ```bash
 forge script script/DeployGameStore.s.sol:DeployGameStore \
@@ -322,15 +355,19 @@ forge script script/DeployGameStore.s.sol:DeployGameStore \
   --broadcast
 ```
 
-- `--rpc-url` → a qué nodo enviar las transacciones.
-- `--private-key` → cuenta que firma y paga el gas; queda como **owner** del contrato.
-- `--broadcast` → sin él, `forge script` solo **simula**; con él, envía de verdad.
+- `--rpc-url` → which node to send the transactions to.
+- `--private-key` → account that signs and pays gas; becomes the contract **owner**.
+- `--broadcast` → without it, `forge script` only **simulates**; with it, it sends
+  for real.
 
-El script despliega `GameStore` y precarga 3 items (Espada 0.01, Escudo 0.005, Poción
-0.001 ETH). En una Anvil recién arrancada el primer despliegue de la cuenta #0 es
-**determinista**: siempre cae en `0x5FbDB2315678afecb367f032d93F642f64180aa3`.
+The script deploys **both** `GameStore` and `Achievements`, wires them together
+(`setAchievements` + `setMinter`), and preloads the full catalog of 10 items (ids
+0–9; e.g. Sword 0.01, Shield 0.008, Bow 0.012, Arrow 0.0005 ETH…). On a freshly
+started Anvil, the first deployment of account #0 is **deterministic**: it always
+lands on `0x5FbDB2315678afecb367f032d93F642f64180aa3` (which the bridge hardcodes).
+`Achievements`, deployed second (nonce 1), lands on its own deterministic address.
 
-### Verificar con `cast call` (lecturas, sin gas)
+### Verify with `cast call` (reads, no gas)
 
 ```bash
 ADDR=0x5FbDB2315678afecb367f032d93F642f64180aa3
@@ -338,35 +375,35 @@ RPC=http://127.0.0.1:8545
 
 cast call $ADDR "priceOf(uint256)(uint256)" 0 --rpc-url $RPC  # 10000000000000000 (0.01 ETH)
 cast call $ADDR "isListed(uint256)(bool)"   0 --rpc-url $RPC  # true
-cast call $ADDR "isListed(uint256)(bool)"  99 --rpc-url $RPC  # false (inexistente)
-cast call $ADDR "owner()(address)"            --rpc-url $RPC  # cuenta #0
+cast call $ADDR "isListed(uint256)(bool)"  99 --rpc-url $RPC  # false (nonexistent)
+cast call $ADDR "owner()(address)"            --rpc-url $RPC  # account #0
 ```
 
-`cast call` ejecuta funciones de **solo lectura**: no cuesta gas ni mina bloques,
-solo consulta el estado actual.
+`cast call` runs **read-only** functions: no gas, no blocks mined, it just queries
+the current state.
 
-### ⚠️ Nota de seguridad sobre las claves de prueba
+### ⚠️ Security note about the test keys
 
-La clave privada usada arriba (`0xac09…ff80`, cuenta `0xf39F…2266`) es una de las
-**claves públicas de prueba de Anvil**: las conoce literalmente todo el mundo. Sirven
-**solo** para desarrollo local.
+The private key used above (`0xac09…ff80`, account `0xf39F…2266`) is one of Anvil's
+**public test keys**: literally everyone knows them. They're **only** for local
+development.
 
-- **Nunca** uses una clave privada real en comandos, código, scripts ni `.env`
-  versionados.
-- **Nunca** envíes fondos reales a una dirección derivada de una clave de prueba: te
-  los pueden robar al instante.
-- En un flujo limpio, la clave se carga desde un `.env` (que está en `.gitignore`) y
-  se pasa como `--private-key $PRIVATE_KEY`, nunca pegada en claro.
+- **Never** use a real private key in commands, code, scripts or versioned `.env`
+  files.
+- **Never** send real funds to an address derived from a test key: they can be
+  stolen instantly.
+- In a clean flow, the key is loaded from a `.env` (which is in `.gitignore`) and
+  passed as `--private-key $PRIVATE_KEY`, never pasted in the clear.
 
 ---
 
-## Estado de esta fase
+## Status of this phase
 
-✅ `GameStore.sol` — ERC-1155 con catálogo, compra, burn y withdraw.
-✅ 13 tests en verde (`forge test`).
-✅ Script de despliegue verificado contra Anvil (deploy + `cast call`).
+✅ `GameStore.sol` — ERC-1155 with catalog, purchase (with dependency rules,
+achievement minting and excess refund), burn and withdraw.
+✅ 37 tests green (`forge test`), across `GameStore`, `Achievements` and the rules.
+✅ Deployment script verified against Anvil (deploy of both contracts + `cast call`).
 
-**Pendiente (anotado arriba):** reembolso del exceso de pago en `buy` (§5.4).
-
-**Siguiente pieza:** el puente web local (`/bridge`) que conecta el juego con
-MetaMask y firma las compras contra este contrato.
+**Next piece:** the local web bridge (`/bridge`) that connects the game with
+MetaMask and signs the purchases against this contract —
+[02 — The web bridge](./02-bridge.md).
