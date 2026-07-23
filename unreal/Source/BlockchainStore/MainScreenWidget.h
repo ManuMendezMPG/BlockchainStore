@@ -298,7 +298,7 @@ private:
 	 *  Returns the square SizeBox ready to place in the grid; stores the inner
 	 *  button in OutButtons/OutIds for the highlight. */
 	USizeBox* MakeItemCell(int32 ItemId, const FString& CornerText, EMainScreenAction ClickAction,
-		TArray<UMainScreenButtonBinding*>& OutBindings, TArray<UButton*>& OutButtons, TArray<int32>& OutIds);
+		TArray<UMainScreenButtonBinding*>& OutBindings, TArray<UButton*>& OutButtons, TArray<int32>& OutIds, float CellSize);
 
 	/** Item icon texture (cached). May return null if it does not load. */
 	UTexture2D* GetIcon(int32 ItemId);

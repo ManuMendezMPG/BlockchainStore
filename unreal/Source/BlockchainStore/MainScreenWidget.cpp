@@ -96,10 +96,13 @@ namespace Style
 	static const FMargin StoreLabelPadding   (0.0f, 0.0f, 8.0f, 0.0f);   // gap between text and button
 
 	// --- Icon grids (inventory / store) ---
-	static const float   CellSize          = 280.0f;                 // square cell (px)
+	// Cell sizes are SEPARATE: the store forces a single row of 10 items (which
+	// needs a wider window, see r.setres=1440x810w), the inventory wraps into 2 rows.
+	static const float   StoreCellSize     = 180.0f;                 // store square cell (px)
+	static const float   InventoryCellSize = 192.0f;                 // inventory square cell (px)
 	static const int32   InventoryColumns  = 4;                     // inventory columns
-	static const float   CellSpacing       = 4.0f;                  // spacing between cells
-	static const FMargin CellIconPadding   (2.0f, 2.0f, 2.0f, 2.0f);// icon margin inside the cell
+	static const float   CellSpacing       = 6.0f;                  // spacing between cells
+	static const FMargin CellIconPadding   (6.0f, 6.0f, 6.0f, 26.0f);// icon margin: bottom strip for price/qty
 	static const FMargin CellCornerPadding (0.0f, 0.0f, 5.0f, 3.0f);// position of the corner text
 	static const float   CellCornerFontSize= 13.0f;                 // "x17" / price
 	static const FLinearColor CellBgColor       = RowBgColor;       // cell background
@@ -523,7 +526,7 @@ UButton* UMainScreenWidget::MakeActionButton(const FString& Label, EMainScreenAc
 // ---------------------------------------------------------------------------------
 
 USizeBox* UMainScreenWidget::MakeItemCell(int32 ItemId, const FString& CornerText, EMainScreenAction ClickAction,
-	TArray<UMainScreenButtonBinding*>& OutBindings, TArray<UButton*>& OutButtons, TArray<int32>& OutIds)
+	TArray<UMainScreenButtonBinding*>& OutBindings, TArray<UButton*>& OutButtons, TArray<int32>& OutIds, float CellSize)
 {
 	UButton* Cell = WidgetTree->ConstructWidget<UButton>(UButton::StaticClass());
 	Cell->SetBackgroundColor(Style::CellBgColor);
@@ -590,8 +593,8 @@ USizeBox* UMainScreenWidget::MakeItemCell(int32 ItemId, const FString& CornerTex
 
 	// Fixed-size square cell.
 	USizeBox* Box = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass());
-	Box->SetWidthOverride(Style::CellSize);
-	Box->SetHeightOverride(Style::CellSize);
+	Box->SetWidthOverride(CellSize);
+	Box->SetHeightOverride(CellSize);
 	Box->AddChild(Cell);
 	return Box;
 }
@@ -683,7 +686,7 @@ void UMainScreenWidget::RepaintInventoryFromSave()
 	for (int32 CellIndex = 0; CellIndex < CellIds.Num(); ++CellIndex)
 	{
 		USizeBox* Cell = MakeItemCell(CellIds[CellIndex], CellCorners[CellIndex],
-			EMainScreenAction::SelectItem, InventoryBindings, InventoryCellButtons, InventoryCellItemIds);
+			EMainScreenAction::SelectItem, InventoryBindings, InventoryCellButtons, InventoryCellItemIds, Style::InventoryCellSize);
 		Grid->AddChildToUniformGrid(Cell, CellIndex / Style::InventoryColumns, CellIndex % Style::InventoryColumns);
 	}
 
@@ -778,7 +781,7 @@ void UMainScreenWidget::HandleCatalogUpdated(const TArray<FStoreCatalogItem>& It
 		}
 
 		USizeBox* Cell = MakeItemCell(Item.ItemId, Corner, EMainScreenAction::SelectStoreItem,
-			StoreBindings, StoreCellButtons, StoreCellItemIds);
+			StoreBindings, StoreCellButtons, StoreCellItemIds, Style::StoreCellSize);
 		Wrap->AddChildToWrapBox(Cell);
 	}
 
