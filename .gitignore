@@ -45,6 +45,8 @@ coverage/
 # Carpetas regenerables que Unreal crea al compilar/abrir el proyecto.
 Binaries/
 Intermediate/
+Build/
+Packaged/
 Saved/
 DerivedDataCache/
 # Solución/proyecto del IDE generados por Unreal
